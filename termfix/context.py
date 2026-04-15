@@ -93,13 +93,17 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
         logger.warning("Could not get screen contents via async_get_screen_contents: %s", exc)
 
     # Attempt 2: explicit row range via async_get_contents(first_row, last_row)
-    # We can't reliably probe the scrollback height on older API versions, so
-    # request a deliberately oversized range (0 … _LARGE).  iTerm2 clamps the
-    # result to whatever is actually available, giving us all scrollback lines.
-    # We then take only the last max_lines from that full result.
-    _LARGE = 100_000
+    # The API takes an inclusive [first, last] row range counted from the top
+    # of the scrollback buffer.  To get the *most recent* lines we need to
+    # know the total line count first, then request the tail of that range.
     try:
-        contents = await session.async_get_contents(0, _LARGE)
+        # Probe with a single-row request to learn the scrollback size.
+        probe = await session.async_get_contents(0, 0)
+        total_lines: int = getattr(probe, "number_of_lines_including_history",
+                                   probe.number_of_lines)
+        first_row = max(0, total_lines - max_lines)
+        last_row = max(0, total_lines - 1)
+        contents = await session.async_get_contents(first_row, last_row)
         for i in range(contents.number_of_lines):
             line = contents.line(i)
             text = line.string if line.string else ""
