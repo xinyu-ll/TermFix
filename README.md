@@ -129,6 +129,8 @@ DeepSeek 推荐填写：
 
 按 `Cmd+L` 会在当前 iTerm2 session 打开一个输入弹窗。输入自己的 prompt 后按 `Enter` 发送，`Shift+Enter` 可换行。模型回复完成后，输入框会重新启用，可以继续追问。
 
+弹窗左侧会显示当前 session 的对话历史。点击历史项可以 resume 之前的对话；点击 **New** 可以开始新对话。
+
 这类请求不会增加错误计数。模型消息结构为：
 
 - **system prompt**：说明当前环境是 iTerm2 命令行，并包含当前 session 最近 50 行命令行内容、工作目录、shell 和系统信息

@@ -36,6 +36,7 @@ from .monitor import PromptEntry
 logger = logging.getLogger(__name__)
 
 _INFO_POPOVER_ID = "__info__"
+_PROMPT_POPOVER_ID = "__prompt__"
 
 
 async def register_status_bar(
@@ -199,10 +200,9 @@ async def _handle_prompt_hotkey(
     if not session_id:
         return
 
-    existing = state.latest_prompt(session_id)
-    if existing is not None and state.is_popover_open(existing.id):
-        state.request_popover_close(existing.id)
-        logger.info("TermFix prompt popover close requested — entry=%s", existing.id)
+    if state.is_popover_open(_PROMPT_POPOVER_ID):
+        state.request_popover_close(_PROMPT_POPOVER_ID)
+        logger.info("TermFix prompt popover close requested")
         return
 
     session = app.get_session_by_id(session_id)
@@ -211,12 +211,28 @@ async def _handle_prompt_hotkey(
         return
 
     try:
-        entry = PromptEntry(session_id=session_id, context={}, session=session)
-        await state.add_prompt(entry)
+        entry = await _pick_or_create_prompt_entry(state, session_id, session)
         await _open_popover(connection, session_id, state, _build_prompt_html(entry, state))
+        state.mark_popover_seen(_PROMPT_POPOVER_ID)
         state.mark_popover_seen(entry.id)
     except Exception as exc:
         logger.error("Failed to open prompt popover: %s", exc, exc_info=True)
+
+
+async def _pick_or_create_prompt_entry(
+    state: "TermFixState",
+    session_id: str,
+    session,
+) -> PromptEntry:
+    """Reuse the latest empty prompt; otherwise start a new conversation."""
+    latest = state.latest_prompt(session_id)
+    if latest is not None and not latest.messages and latest.status == "input":
+        latest.session = session
+        return latest
+
+    entry = PromptEntry(session_id=session_id, context={}, session=session)
+    await state.add_prompt(entry)
+    return entry
 
 
 def _start_analysis_task(entry, state: "TermFixState") -> None:
@@ -377,8 +393,18 @@ def _ensure_status_server(state: "TermFixState") -> None:
             if parsed.path == "/closed":
                 entry_id = parse_qs(parsed.query).get("entry", [""])[0]
                 if entry_id:
+                    if state.get_prompt(entry_id) is not None:
+                        state.mark_popover_closed(_PROMPT_POPOVER_ID)
                     state.mark_popover_closed(entry_id)
                 self._send_json({"ok": True})
+                return
+
+            if parsed.path == "/prompt/new":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                self._send_json(_create_prompt_from_thread(state, entry_id))
                 return
 
             if parsed.path == "/prompt":
@@ -448,15 +474,21 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
 
     prompt_entry = state.get_prompt(entry_id)
     if prompt_entry is not None:
+        state.mark_popover_seen(_PROMPT_POPOVER_ID)
         state.mark_popover_seen(entry_id)
         done = prompt_entry.status in ("done", "error", "cancelled")
         return {
             "ok": True,
             "entry_id": prompt_entry.id,
+            "session_id": prompt_entry.session_id,
             "status": prompt_entry.status,
             "done": done,
-            "should_close": state.consume_popover_close_request(entry_id),
+            "should_close": (
+                state.consume_popover_close_request(_PROMPT_POPOVER_ID)
+                or state.consume_popover_close_request(entry_id)
+            ),
             "updated_at": prompt_entry.updated_at,
+            "history_html": _prompt_history_to_html(state, prompt_entry.session_id, entry_id),
             "body_html": _conversation_to_html(
                 prompt_entry.messages,
                 prompt_entry.result or "",
@@ -505,6 +537,43 @@ def _submit_prompt_from_thread(state: "TermFixState", entry_id: str, prompt: str
     except Exception as exc:
         logger.error("Prompt submit failed: %s", exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
+
+
+def _create_prompt_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Create a new prompt conversation based on an existing prompt's session."""
+    if not entry_id:
+        return {"ok": False, "error": "Missing prompt entry."}
+    if state.loop is None:
+        return {"ok": False, "error": "TermFix event loop is unavailable."}
+
+    future = asyncio.run_coroutine_threadsafe(
+        _create_prompt_entry(entry_id, state),
+        state.loop,
+    )
+    try:
+        return future.result(timeout=2)
+    except Exception as exc:
+        logger.error("Prompt creation failed: %s", exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+
+
+async def _create_prompt_entry(entry_id: str, state: "TermFixState") -> dict:
+    """Create an empty prompt conversation for the same session as entry_id."""
+    current = state.get_prompt(entry_id)
+    if current is None:
+        return {"ok": False, "error": "Prompt entry expired."}
+    if not current.messages and current.status == "input":
+        return {"ok": True, "entry_id": current.id}
+
+    entry = PromptEntry(
+        session_id=current.session_id,
+        context={},
+        session=current.session,
+    )
+    await state.add_prompt(entry)
+    state.mark_popover_seen(_PROMPT_POPOVER_ID)
+    state.mark_popover_seen(entry.id)
+    return {"ok": True, "entry_id": entry.id}
 
 
 async def _submit_prompt_entry(entry_id: str, prompt: str, state: "TermFixState") -> dict:
@@ -767,9 +836,12 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     """Build the manual prompt popover."""
     _ensure_status_server(state)
-    endpoint = json.dumps(f"{state.status_server_url}/state?entry={entry.id}")
-    submit_endpoint = json.dumps(f"{state.status_server_url}/prompt?entry={entry.id}")
-    close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={entry.id}")
+    state_endpoint = json.dumps(f"{state.status_server_url}/state")
+    submit_endpoint = json.dumps(f"{state.status_server_url}/prompt")
+    new_endpoint = json.dumps(f"{state.status_server_url}/prompt/new")
+    close_endpoint = json.dumps(f"{state.status_server_url}/closed")
+    active_entry_id = json.dumps(entry.id)
+    history = _prompt_history_to_html(state, entry.session_id, entry.id)
     body = _conversation_to_html(entry.messages, entry.result or "")
 
     return f"""\
@@ -820,6 +892,77 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       align-items: flex-start;
       padding-top: 10px;
       border-top: 1px solid #e5e5ea;
+    }}
+    .prompt-shell {{
+      display: flex;
+      flex: 1;
+      min-height: 0;
+      gap: 12px;
+    }}
+    .history-pane {{
+      width: 116px;
+      flex: 0 0 116px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #e5e5ea;
+      padding-right: 10px;
+    }}
+    .new-chat {{
+      width: 100%;
+      height: 30px;
+      margin-bottom: 8px;
+      background: #0f766e;
+    }}
+    .history-list {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 0;
+      overflow-y: auto;
+    }}
+    .history-item {{
+      width: 100%;
+      min-height: 42px;
+      height: auto;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: #3c3c43;
+      padding: 6px 7px;
+      text-align: left;
+      font-weight: 500;
+    }}
+    .history-item.active {{
+      border-color: #0f766e;
+      background: #e6f4f1;
+      color: #163f3a;
+    }}
+    .history-item.running .history-title::after {{
+      content: " ...";
+      color: #0f766e;
+    }}
+    .history-title {{
+      width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .history-time {{
+      font-size: 10px;
+      color: #8e8e93;
+      font-weight: 500;
+    }}
+    .chat-pane {{
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
     }}
     textarea {{
       flex: 1;
@@ -942,19 +1085,31 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
 
-  <div id="content" class="conversation">{body}</div>
-  <form id="prompt-form">
-    <textarea id="prompt-input" placeholder="Ask about this terminal session" autofocus></textarea>
-    <button id="send-button" type="submit">Send</button>
-  </form>
+  <div class="prompt-shell">
+    <aside class="history-pane">
+      <button id="new-chat-button" class="new-chat" type="button">New</button>
+      <div id="history-list" class="history-list">{history}</div>
+    </aside>
+    <section class="chat-pane">
+      <div id="content" class="conversation">{body}</div>
+      <form id="prompt-form">
+        <textarea id="prompt-input" placeholder="Ask about this terminal session" autofocus></textarea>
+        <button id="send-button" type="submit">Send</button>
+      </form>
+    </section>
+  </div>
 
   <script>
-    const endpoint = {endpoint};
+    const stateEndpoint = {state_endpoint};
     const submitEndpoint = {submit_endpoint};
+    const newEndpoint = {new_endpoint};
     const closeEndpoint = {close_endpoint};
+    let activeEntryId = {active_entry_id};
     const formEl = document.getElementById("prompt-form");
     const promptEl = document.getElementById("prompt-input");
     const sendButton = document.getElementById("send-button");
+    const newChatButton = document.getElementById("new-chat-button");
+    const historyListEl = document.getElementById("history-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
     let lastHtml = contentEl.innerHTML;
@@ -965,12 +1120,16 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     promptEl.disabled = busy;
     sendButton.disabled = busy;
 
+    function withEntry(url) {{
+      return url + "?entry=" + encodeURIComponent(activeEntryId);
+    }}
+
     function reportClosed() {{
       try {{
         if (navigator.sendBeacon) {{
-          navigator.sendBeacon(closeEndpoint);
+          navigator.sendBeacon(withEntry(closeEndpoint));
         }} else {{
-          fetch(closeEndpoint, {{ method: "POST", keepalive: true }});
+          fetch(withEntry(closeEndpoint), {{ method: "POST", keepalive: true }});
         }}
       }} catch (error) {{
         // Best effort only.
@@ -1010,8 +1169,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
 
     async function refresh() {{
       try {{
-        const sep = endpoint.includes("?") ? "&" : "?";
-        const response = await fetch(endpoint + sep + "t=" + Date.now(), {{
+        const response = await fetch(withEntry(stateEndpoint) + "&t=" + Date.now(), {{
           cache: "no-store"
         }});
         const data = await response.json();
@@ -1024,15 +1182,21 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
           contentEl.innerHTML = data.body_html;
           scrollContentToBottom();
         }}
+        if (typeof data.history_html === "string") {{
+          historyListEl.innerHTML = data.history_html;
+        }}
         setStatus(data.status);
-        if (data.done && timer) {{
+        busy = data.status === "streaming";
+        promptEl.disabled = busy;
+        sendButton.disabled = busy;
+        if (busy && !timer) {{
+          timer = setInterval(refresh, 350);
+        }}
+        if (!busy && timer) {{
           clearInterval(timer);
           timer = null;
         }}
-        if (data.done) {{
-          busy = false;
-          promptEl.disabled = false;
-          sendButton.disabled = false;
+        if (!busy) {{
           promptEl.focus();
         }}
       }} catch (error) {{
@@ -1052,7 +1216,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       promptEl.value = "";
 
       try {{
-        const response = await fetch(submitEndpoint, {{
+        const response = await fetch(withEntry(submitEndpoint), {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{ prompt }})
@@ -1075,9 +1239,41 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       }}
     }}
 
+    function setActiveEntry(entryId) {{
+      if (!entryId || entryId === activeEntryId) {{
+        return;
+      }}
+      activeEntryId = entryId;
+      lastHtml = "";
+      promptEl.value = "";
+      refresh();
+    }}
+
     formEl.addEventListener("submit", (event) => {{
       event.preventDefault();
       submitPrompt();
+    }});
+
+    newChatButton.addEventListener("click", async () => {{
+      try {{
+        const response = await fetch(withEntry(newEndpoint), {{ method: "POST" }});
+        const data = await response.json();
+        if (!data.ok) {{
+          throw new Error(data.error || "Could not create conversation.");
+        }}
+        setActiveEntry(data.entry_id);
+      }} catch (error) {{
+        setStatus("error");
+        contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
+      }}
+    }});
+
+    historyListEl.addEventListener("click", (event) => {{
+      const item = event.target.closest("[data-entry-id]");
+      if (!item) {{
+        return;
+      }}
+      setActiveEntry(item.getAttribute("data-entry-id"));
     }});
 
     promptEl.addEventListener("compositionstart", () => {{
@@ -1278,6 +1474,44 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
         state.context_lines = int(ctx_raw)
+
+
+def _prompt_history_to_html(
+    state: "TermFixState",
+    session_id: str,
+    active_entry_id: str,
+) -> str:
+    """Render prompt history buttons for the current terminal session."""
+    entries = [entry for entry in state.prompts if entry.session_id == session_id]
+    if not entries:
+        return ""
+
+    blocks: list[str] = []
+    for entry in reversed(entries[-20:]):
+        active = " active" if entry.id == active_entry_id else ""
+        status = " running" if entry.status == "streaming" else ""
+        title = html.escape(_prompt_history_title(entry))
+        subtitle = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
+        blocks.append(
+            f'<button class="history-item{active}{status}" '
+            f'data-entry-id="{html.escape(entry.id)}" type="button">'
+            f'<span class="history-title">{title}</span>'
+            f'<span class="history-time">{subtitle}</span>'
+            "</button>"
+        )
+    return "\n".join(blocks)
+
+
+def _prompt_history_title(entry: PromptEntry) -> str:
+    """Return a short title for a prompt conversation."""
+    for message in entry.messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "").strip().splitlines()
+        if content and content[0].strip():
+            title = content[0].strip()
+            return title[:28] + ("..." if len(title) > 28 else "")
+    return "New chat"
 
 
 def _conversation_to_html(messages: list[dict], current_response: str = "") -> str:
