@@ -127,12 +127,12 @@ DeepSeek 推荐填写：
 
 ### 手动提问
 
-按 `Cmd+L` 会在当前 iTerm2 session 打开一个输入弹窗。输入自己的 prompt 后按 `Enter` 发送，`Shift+Enter` 可换行。
+按 `Cmd+L` 会在当前 iTerm2 session 打开一个输入弹窗。输入自己的 prompt 后按 `Enter` 发送，`Shift+Enter` 可换行。模型回复完成后，输入框会重新启用，可以继续追问。
 
 这类请求不会增加错误计数。模型消息结构为：
 
 - **system prompt**：说明当前环境是 iTerm2 命令行，并包含当前 session 最近 50 行命令行内容、工作目录、shell 和系统信息
-- **user prompt**：只包含你在弹窗中输入的内容
+- **conversation messages**：只包含这个弹窗内的多轮 user / assistant 对话内容；每次新问题仍由用户输入作为最新 user message
 
 ## 项目结构
 

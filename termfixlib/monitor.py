@@ -39,6 +39,7 @@ class PromptEntry:
     session_id: str
     context: dict
     session: Optional[iterm2.Session] = None
+    messages: list[dict] = field(default_factory=list)
     id: str = field(default_factory=lambda: uuid4().hex)
     timestamp: float = field(default_factory=time.time)
     user_prompt: str = ""

@@ -315,9 +315,13 @@ async def _run_streaming_prompt(entry: PromptEntry, state: "TermFixState") -> No
             api_key=state.api_key,
             base_url=state.base_url,
             model=state.model,
+            messages=list(entry.messages),
         ):
             entry.result = snapshot or entry.result
             entry.updated_at = time.time()
+        if entry.result:
+            entry.messages.append({"role": "assistant", "content": entry.result})
+            entry.result = None
         entry.status = "done"
         entry.updated_at = time.time()
     except asyncio.CancelledError:
@@ -453,7 +457,10 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
             "done": done,
             "should_close": state.consume_popover_close_request(entry_id),
             "updated_at": prompt_entry.updated_at,
-            "body_html": _markdown_to_html(prompt_entry.result or ""),
+            "body_html": _conversation_to_html(
+                prompt_entry.messages,
+                prompt_entry.result or "",
+            ),
         }
 
     entry = state.get_error(entry_id)
@@ -509,6 +516,7 @@ async def _submit_prompt_entry(entry_id: str, prompt: str, state: "TermFixState"
         return {"ok": False, "error": "Prompt is already running."}
 
     entry.user_prompt = prompt
+    entry.messages.append({"role": "user", "content": prompt})
     entry.result = "Analyzing..."
     entry.updated_at = time.time()
     _start_prompt_analysis_task(entry, state)
@@ -762,7 +770,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     endpoint = json.dumps(f"{state.status_server_url}/state?entry={entry.id}")
     submit_endpoint = json.dumps(f"{state.status_server_url}/prompt?entry={entry.id}")
     close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={entry.id}")
-    body = _markdown_to_html(entry.result or "")
+    body = _conversation_to_html(entry.messages, entry.result or "")
 
     return f"""\
 <!DOCTYPE html>
@@ -841,6 +849,40 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       background: #c7c7cc;
       cursor: default;
     }}
+    .conversation {{
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-bottom: 4px;
+    }}
+    .turn {{
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }}
+    .role {{
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      color: #8e8e93;
+    }}
+    .bubble {{
+      border-radius: 6px;
+      padding: 8px 10px;
+      overflow-x: auto;
+    }}
+    .turn.user {{
+      align-items: flex-end;
+    }}
+    .turn.user .bubble {{
+      max-width: 92%;
+      background: #e6f4f1;
+      color: #163f3a;
+    }}
+    .turn.assistant .bubble {{
+      background: #f8f8fa;
+    }}
     .markdown h1,
     .markdown h2,
     .markdown h3 {{
@@ -893,7 +935,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     <textarea id="prompt-input" placeholder="Ask about this terminal session" autofocus></textarea>
     <button id="send-button" type="submit">Send</button>
   </form>
-  <div id="content" class="markdown">{body}</div>
+  <div id="content" class="conversation">{body}</div>
 
   <script>
     const endpoint = {endpoint};
@@ -907,8 +949,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     let lastHtml = contentEl.innerHTML;
     let timer = null;
     let closing = false;
-    let submitted = false;
+    let busy = statusEl.textContent === "streaming";
     let composing = false;
+    promptEl.disabled = busy;
+    sendButton.disabled = busy;
 
     function reportClosed() {{
       try {{
@@ -969,6 +1013,12 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
           clearInterval(timer);
           timer = null;
         }}
+        if (data.done) {{
+          busy = false;
+          promptEl.disabled = false;
+          sendButton.disabled = false;
+          promptEl.focus();
+        }}
       }} catch (error) {{
         setStatus("offline");
       }}
@@ -976,15 +1026,14 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
 
     async function submitPrompt() {{
       const prompt = promptEl.value.trim();
-      if (!prompt || submitted) {{
+      if (!prompt || busy) {{
         return;
       }}
-      submitted = true;
+      busy = true;
       promptEl.disabled = true;
       sendButton.disabled = true;
       setStatus("streaming");
-      lastHtml = "<p>Analyzing...</p>";
-      contentEl.innerHTML = lastHtml;
+      promptEl.value = "";
 
       try {{
         const response = await fetch(submitEndpoint, {{
@@ -1003,6 +1052,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       }} catch (error) {{
         setStatus("error");
         contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
+        busy = false;
+        promptEl.disabled = false;
+        sendButton.disabled = false;
+        promptEl.focus();
       }}
     }}
 
@@ -1208,6 +1261,46 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
         state.context_lines = int(ctx_raw)
+
+
+def _conversation_to_html(messages: list[dict], current_response: str = "") -> str:
+    """Render a prompt conversation transcript."""
+    blocks: list[str] = []
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = str(message.get("content") or "")
+        if role == "user":
+            blocks.append(
+                '<section class="turn user">'
+                '<div class="role">You</div>'
+                f'<div class="bubble">{_plain_text_to_html(content)}</div>'
+                "</section>"
+            )
+        elif role == "assistant":
+            blocks.append(
+                '<section class="turn assistant">'
+                '<div class="role">TermFix</div>'
+                f'<div class="bubble markdown">{_markdown_to_html(content)}</div>'
+                "</section>"
+            )
+
+    if current_response:
+        blocks.append(
+            '<section class="turn assistant">'
+            '<div class="role">TermFix</div>'
+            f'<div class="bubble markdown">{_markdown_to_html(current_response)}</div>'
+            "</section>"
+        )
+
+    return "\n".join(blocks)
+
+
+def _plain_text_to_html(text: str) -> str:
+    """Render user-authored prompt text without interpreting Markdown."""
+    return html.escape(text).replace("\n", "<br>")
 
 
 def _markdown_to_html(markdown: str) -> str:

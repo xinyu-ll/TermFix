@@ -8,7 +8,7 @@ import logging
 import threading
 import urllib.error
 import urllib.request
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from .config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
 from .context import build_manual_system_prompt, build_user_message
@@ -111,8 +111,9 @@ async def stream_user_prompt(
     api_key: str,
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
+    messages: Optional[list[dict]] = None,
 ) -> AsyncIterator[AnalysisResult]:
-    """Call the model with terminal context in system prompt and user text as user prompt."""
+    """Call the model with terminal context in system prompt and user text/history."""
     if not api_key:
         logger.warning("No API key configured — skipping user prompt")
         yield """\
@@ -132,7 +133,14 @@ TermFix needs a provider API key before it can answer a prompt.
     try:
         logger.info("Starting user prompt via %s model=%s", base_url, model)
         result = ""
-        async for snapshot in _stream_api(api_key, base_url, model, user_prompt, system_prompt):
+        async for snapshot in _stream_api(
+            api_key,
+            base_url,
+            model,
+            user_prompt,
+            system_prompt,
+            messages=messages,
+        ):
             result = snapshot
             yield snapshot
         logger.info("User prompt completed (%d chars)", len(result))
@@ -161,6 +169,7 @@ async def _call_api(
     model: str,
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
+    messages: Optional[list[dict]] = None,
 ) -> AnalysisResult:
     """Make the actual API call and return Markdown."""
     response_text = await asyncio.to_thread(
@@ -170,6 +179,7 @@ async def _call_api(
         model,
         user_message,
         system_prompt,
+        messages,
     )
 
     logger.debug("LLM response received (%d chars)", len(response_text))
@@ -182,6 +192,7 @@ async def _stream_api(
     model: str,
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
+    messages: Optional[list[dict]] = None,
 ) -> AsyncIterator[AnalysisResult]:
     """Stream cumulative Markdown snapshots from the provider without blocking the loop."""
     loop = asyncio.get_running_loop()
@@ -198,6 +209,7 @@ async def _stream_api(
                 model,
                 user_message,
                 system_prompt,
+                messages,
             ):
                 emit("snapshot", snapshot)
             emit("done")
@@ -224,6 +236,7 @@ def _post_chat_completion(
     model: str,
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
+    messages: Optional[list[dict]] = None,
 ) -> str:
     """Send a chat-completions request using urllib."""
     payload = {
@@ -231,10 +244,7 @@ def _post_chat_completion(
         "max_tokens": 1024,
         "temperature": 0.1,
         "stream": False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": _build_chat_messages(system_prompt, user_message, messages),
     }
     request = urllib.request.Request(
         url=f"{_normalise_base_url(base_url)}/chat/completions",
@@ -271,6 +281,7 @@ def _post_chat_completion_stream(
     model: str,
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
+    messages: Optional[list[dict]] = None,
 ):
     """Send a streaming chat-completions request and yield cumulative content."""
     payload = {
@@ -278,10 +289,7 @@ def _post_chat_completion_stream(
         "max_tokens": 1024,
         "temperature": 0.1,
         "stream": True,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": _build_chat_messages(system_prompt, user_message, messages),
     }
     request = urllib.request.Request(
         url=f"{_normalise_base_url(base_url)}/chat/completions",
@@ -329,6 +337,33 @@ def _post_chat_completion_stream(
 
     if not yielded:
         raise ApiError(502, "Provider streaming response did not include content.")
+
+
+def _build_chat_messages(
+    system_prompt: str,
+    user_message: str,
+    messages: Optional[list[dict]] = None,
+) -> list[dict]:
+    """Build a provider-safe message list from optional conversation history."""
+    chat_messages = [{"role": "system", "content": system_prompt}]
+    source_messages = messages or [{"role": "user", "content": user_message}]
+
+    for message in source_messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = _extract_content(message.get("content"))
+        if not content:
+            content = str(message.get("content") or "")
+        if content.strip():
+            chat_messages.append({"role": role, "content": content})
+
+    if len(chat_messages) == 1 and user_message.strip():
+        chat_messages.append({"role": "user", "content": user_message})
+
+    return chat_messages
 
 
 def _extract_content(content) -> str:
