@@ -897,7 +897,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       padding-bottom: 10px;
       border-bottom: 1px solid #e5e5ea;
     }}
-    header h1 {{ font-size: 14px; font-weight: 600; color: #0f766e; }}
+    header h1 {{ font-size: 14px; font-weight: 600; color: #0d0d0d; }}
     .status {{
       margin-left: auto;
       font-size: 11px;
@@ -935,7 +935,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       width: 100%;
       height: 30px;
       margin-bottom: 8px;
-      background: #0f766e;
+      background: #0d0d0d;
     }}
     .history-list {{
       display: flex;
@@ -961,13 +961,13 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       font-weight: 500;
     }}
     .history-item.active {{
-      border-color: #0f766e;
-      background: #e6f4f1;
-      color: #163f3a;
+      border-color: #d9d9d9;
+      background: #f4f4f4;
+      color: #0d0d0d;
     }}
     .history-item.running .history-title::after {{
       content: " ...";
-      color: #0f766e;
+      color: #6b7280;
     }}
     .history-title {{
       width: 100%;
@@ -1001,8 +1001,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       outline: none;
     }}
     textarea:focus {{
-      border-color: #0f766e;
-      box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.12);
+      border-color: #9ca3af;
+      box-shadow: 0 0 0 2px rgba(13, 13, 13, 0.08);
     }}
     textarea:disabled {{
       color: #636366;
@@ -1013,7 +1013,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       height: 32px;
       border: 0;
       border-radius: 6px;
-      background: #0f766e;
+      background: #0d0d0d;
       color: #ffffff;
       font: inherit;
       font-weight: 600;
@@ -1054,8 +1054,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }}
     .turn.user .bubble {{
       max-width: 92%;
-      background: #e6f4f1;
-      color: #163f3a;
+      background: #f4f4f4;
+      color: #0d0d0d;
     }}
     .turn.assistant .bubble {{
       background: #f8f8fa;
@@ -1064,7 +1064,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     .markdown h2,
     .markdown h3 {{
       font-size: 13px;
-      color: #0f766e;
+      color: #0d0d0d;
       margin: 12px 0 6px;
     }}
     .markdown h1:first-child,
@@ -1089,7 +1089,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       padding: 1px 4px;
     }}
     .markdown pre code {{
-      color: #30d158;
+      color: #ececf1;
       background: transparent;
       border-radius: 0;
       padding: 0;
@@ -1104,7 +1104,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
 </head>
 <body>
   <header>
-    <h1>TermFix Prompt</h1>
+    <h1>🔍 TermFix</h1>
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
 
