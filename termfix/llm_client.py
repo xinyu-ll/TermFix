@@ -1,12 +1,12 @@
 """
 LLM client for TermFix.
 
-Uses the official Anthropic async SDK with:
-  • Streaming  — avoids SDK HTTP timeouts on long outputs
-  • Prompt caching — stable system prompt marked with cache_control so
-    repeated calls pay ~10 % of the input-token cost after the first hit
-  • Adaptive thinking — claude-opus-4-6 decides internally how much
-    reasoning to invest; no budget_tokens needed
+Uses the OpenAI-compatible endpoint exposed by Anthropic
+(https://api.anthropic.com/v1/) so that any OpenAI-SDK-compatible
+client can talk to Claude models without the Anthropic SDK.
+
+  • Streaming — collects chunks to avoid HTTP timeouts on long outputs
+  • System message — stable SYSTEM_PROMPT sent as role:system turn
 """
 
 from __future__ import annotations
@@ -16,12 +16,15 @@ import logging
 import re
 from typing import Optional
 
-import anthropic
+import openai
 
 from config import DEFAULT_MODEL, SYSTEM_PROMPT
 from context import build_user_message
 
 logger = logging.getLogger(__name__)
+
+# Anthropic's OpenAI-compatible base URL
+_API_BASE_URL = "https://api.anthropic.com/v1/"
 
 # ── Type alias for the structured result ──────────────────────────────────
 
@@ -30,7 +33,7 @@ AnalysisResult = dict  # {"cause": str, "fix_commands": list[str], "explanation"
 _EMPTY_RESULT: AnalysisResult = {
     "cause": "Analysis unavailable.",
     "fix_commands": [],
-    "explanation": "Could not contact the Claude API. Check your API key and network.",
+    "explanation": "Could not contact the API. Check your API key and network.",
 }
 
 
@@ -41,7 +44,7 @@ async def analyze_error(
     api_key: str,
     model: str = DEFAULT_MODEL,
 ) -> AnalysisResult:
-    """Call Claude to analyse a failed command and return a structured result.
+    """Call Claude via the OpenAI-compatible endpoint and return a structured result.
 
     Args:
         context:  Dict produced by context.collect_context().
@@ -64,19 +67,19 @@ async def analyze_error(
     user_message = build_user_message(context)
 
     try:
-        result = await _call_claude(api_key, model, user_message)
+        result = await _call_api(api_key, model, user_message)
         return result
-    except anthropic.AuthenticationError:
-        logger.error("Anthropic authentication failed — check API key")
+    except openai.AuthenticationError:
+        logger.error("Authentication failed — check API key")
         return {**_EMPTY_RESULT, "cause": "Authentication failed. Verify your Anthropic API key."}
-    except anthropic.RateLimitError:
-        logger.warning("Anthropic rate limit hit")
-        return {**_EMPTY_RESULT, "cause": "Rate limited by Anthropic API. Please wait and try again."}
-    except anthropic.APIConnectionError as exc:
-        logger.error("Network error reaching Anthropic API: %s", exc)
+    except openai.RateLimitError:
+        logger.warning("Rate limit hit")
+        return {**_EMPTY_RESULT, "cause": "Rate limited by API. Please wait and try again."}
+    except openai.APIConnectionError as exc:
+        logger.error("Network error reaching API: %s", exc)
         return {**_EMPTY_RESULT, "cause": f"Network error: {exc}"}
-    except anthropic.APIStatusError as exc:
-        logger.error("Anthropic API status error %s: %s", exc.status_code, exc.message)
+    except openai.APIStatusError as exc:
+        logger.error("API status error %s: %s", exc.status_code, exc.message)
         return {**_EMPTY_RESULT, "cause": f"API error {exc.status_code}: {exc.message}"}
     except Exception as exc:
         logger.exception("Unexpected error during LLM analysis")
@@ -85,55 +88,36 @@ async def analyze_error(
 
 # ── Private helpers ────────────────────────────────────────────────────────
 
-async def _call_claude(
+async def _call_api(
     api_key: str,
     model: str,
     user_message: str,
 ) -> AnalysisResult:
     """Make the actual streaming API call and parse the JSON response."""
-    client = anthropic.AsyncAnthropic(api_key=api_key)
-
-    # System prompt is stable → mark for prefix caching.
-    # If the prompt is shorter than the model's minimum cacheable prefix
-    # (~4096 tokens for Opus 4.6), the cache_control is silently ignored —
-    # no error is raised, the call just doesn't benefit from caching.
-    system_blocks = [
-        {
-            "type": "text",
-            "text": SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-
-    # Use streaming so large outputs don't hit HTTP timeouts.
-    # get_final_message() waits for the complete response without needing
-    # to handle individual delta events.
-    async with client.messages.stream(
-        model=model,
-        max_tokens=1024,
-        thinking={"type": "adaptive"},
-        system=system_blocks,
-        messages=[{"role": "user", "content": user_message}],
-    ) as stream:
-        message = await stream.get_final_message()
-
-    raw_text = _extract_text(message)
-    logger.debug(
-        "LLM response — input=%d cached_read=%d output=%d tokens",
-        message.usage.input_tokens,
-        getattr(message.usage, "cache_read_input_tokens", 0),
-        message.usage.output_tokens,
+    client = openai.AsyncOpenAI(
+        api_key=api_key,
+        base_url=_API_BASE_URL,
     )
 
-    return _parse_json(raw_text)
+    # Collect streamed chunks to avoid HTTP timeouts on long outputs.
+    stream = await client.chat.completions.create(
+        model=model,
+        max_tokens=1024,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        stream=True,
+    )
 
+    text = ""
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            text += delta
 
-def _extract_text(message: anthropic.types.Message) -> str:
-    """Pull the first TextBlock from a Message (thinking blocks come first)."""
-    for block in message.content:
-        if block.type == "text":
-            return block.text
-    return ""
+    logger.debug("LLM response received (%d chars)", len(text))
+    return _parse_json(text)
 
 
 def _parse_json(raw: str) -> AnalysisResult:
