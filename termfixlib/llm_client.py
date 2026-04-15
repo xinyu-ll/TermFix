@@ -11,7 +11,7 @@ import urllib.request
 from typing import AsyncIterator
 
 from .config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
-from .context import build_user_message
+from .context import build_manual_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +105,62 @@ TermFix needs a provider API key before it can analyze terminal errors.
         yield _error_markdown("Unexpected error.", str(exc))
 
 
+async def stream_user_prompt(
+    context: dict,
+    user_prompt: str,
+    api_key: str,
+    base_url: str = DEFAULT_BASE_URL,
+    model: str = DEFAULT_MODEL,
+) -> AsyncIterator[AnalysisResult]:
+    """Call the model with terminal context in system prompt and user text as user prompt."""
+    if not api_key:
+        logger.warning("No API key configured — skipping user prompt")
+        yield """\
+### Cause
+No API key is configured.
+
+### Fix
+Configure the `API Key` knob on the TermFix status bar component.
+
+### Details
+TermFix needs a provider API key before it can answer a prompt.
+"""
+        return
+
+    system_prompt = build_manual_system_prompt(context)
+
+    try:
+        logger.info("Starting user prompt via %s model=%s", base_url, model)
+        result = ""
+        async for snapshot in _stream_api(api_key, base_url, model, user_prompt, system_prompt):
+            result = snapshot
+            yield snapshot
+        logger.info("User prompt completed (%d chars)", len(result))
+    except ApiError as exc:
+        if exc.status_code == 401:
+            logger.error("Authentication failed — check API key")
+            yield _error_markdown("Authentication failed.", "Verify your API key.")
+            return
+        if exc.status_code == 429:
+            logger.warning("Rate limit hit")
+            yield _error_markdown("Rate limited by API.", "Wait and try again.")
+            return
+        logger.error("API status error %s: %s", exc.status_code, exc.message)
+        yield _error_markdown(f"API error {exc.status_code}.", exc.message)
+    except urllib.error.URLError as exc:
+        logger.error("Network error reaching API: %s", exc)
+        yield _error_markdown("Network error.", str(exc.reason))
+    except Exception as exc:
+        logger.exception("Unexpected error during user prompt")
+        yield _error_markdown("Unexpected error.", str(exc))
+
+
 async def _call_api(
     api_key: str,
     base_url: str,
     model: str,
     user_message: str,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> AnalysisResult:
     """Make the actual API call and return Markdown."""
     response_text = await asyncio.to_thread(
@@ -118,6 +169,7 @@ async def _call_api(
         base_url,
         model,
         user_message,
+        system_prompt,
     )
 
     logger.debug("LLM response received (%d chars)", len(response_text))
@@ -129,6 +181,7 @@ async def _stream_api(
     base_url: str,
     model: str,
     user_message: str,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> AsyncIterator[AnalysisResult]:
     """Stream cumulative Markdown snapshots from the provider without blocking the loop."""
     loop = asyncio.get_running_loop()
@@ -139,7 +192,13 @@ async def _stream_api(
 
     def worker() -> None:
         try:
-            for snapshot in _post_chat_completion_stream(api_key, base_url, model, user_message):
+            for snapshot in _post_chat_completion_stream(
+                api_key,
+                base_url,
+                model,
+                user_message,
+                system_prompt,
+            ):
                 emit("snapshot", snapshot)
             emit("done")
         except BaseException as exc:  # noqa: BLE001 - forwarded to async caller.
@@ -164,6 +223,7 @@ def _post_chat_completion(
     base_url: str,
     model: str,
     user_message: str,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> str:
     """Send a chat-completions request using urllib."""
     payload = {
@@ -172,7 +232,7 @@ def _post_chat_completion(
         "temperature": 0.1,
         "stream": False,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
     }
@@ -210,6 +270,7 @@ def _post_chat_completion_stream(
     base_url: str,
     model: str,
     user_message: str,
+    system_prompt: str = SYSTEM_PROMPT,
 ):
     """Send a streaming chat-completions request and yield cumulative content."""
     payload = {
@@ -218,7 +279,7 @@ def _post_chat_completion_stream(
         "temperature": 0.1,
         "stream": True,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
     }

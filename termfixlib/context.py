@@ -49,20 +49,8 @@ async def collect_context(
 
 
 async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
-    """Capture the last *max_lines* lines visible on the terminal screen."""
+    """Capture the last *max_lines* lines available from the terminal session."""
     lines: list[str] = []
-
-    try:
-        screen: iterm2.ScreenContents = await session.async_get_screen_contents()
-        for i in range(screen.number_of_lines):
-            line = screen.line(i)
-            text: str = line.string if line.string else ""
-            lines.append(text.rstrip())
-        return "\n".join(lines[-max_lines:])
-    except AttributeError:
-        logger.debug("async_get_screen_contents unavailable, trying async_get_contents")
-    except Exception as exc:
-        logger.warning("Could not get screen contents via async_get_screen_contents: %s", exc)
 
     large = 100_000
     try:
@@ -72,8 +60,23 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
             text = line.string if line.string else ""
             lines.append(text.rstrip())
         return "\n".join(lines[-max_lines:])
+    except AttributeError:
+        logger.debug("async_get_contents unavailable, trying async_get_screen_contents")
     except Exception as exc:
         logger.warning("Could not get terminal contents: %s", exc)
+
+    lines = []
+    try:
+        screen: iterm2.ScreenContents = await session.async_get_screen_contents()
+        for i in range(screen.number_of_lines):
+            line = screen.line(i)
+            text: str = line.string if line.string else ""
+            lines.append(text.rstrip())
+        return "\n".join(lines[-max_lines:])
+    except AttributeError:
+        logger.debug("async_get_screen_contents unavailable")
+    except Exception as exc:
+        logger.warning("Could not get screen contents via async_get_screen_contents: %s", exc)
 
     return ""
 
@@ -103,5 +106,29 @@ def build_user_message(ctx: dict) -> str:
         "---",
         "",
         "Analyze the error above and return your Markdown response.",
+    ]
+    return "\n".join(lines)
+
+
+def build_manual_system_prompt(ctx: dict) -> str:
+    """Build the system message for a user-authored terminal question."""
+    lines = [
+        "You are TermFix, an assistant integrated into iTerm2.",
+        "The user is working in an iTerm2 command-line environment.",
+        "Use the terminal session context below as system context for this request.",
+        "The command-line code/output is the recent terminal content captured from the current session.",
+        "",
+        f"Working directory: {ctx.get('cwd') or '(unknown)'}",
+        f"Shell: {ctx.get('shell') or '(unknown)'}",
+        f"OS: {ctx.get('os_name') or '(unknown)'} {ctx.get('os_version') or ''}".rstrip(),
+        "",
+        "Current iTerm2 session command-line code/output (last 50 lines):",
+        "---",
+        ctx.get("terminal_output") or "(no terminal content captured)",
+        "---",
+        "",
+        "Answer the user's prompt directly and concisely. When suggesting terminal commands,",
+        "prefer safe, non-destructive commands and explain destructive operations clearly before use.",
+        "Do not invent terminal state that is not present in the context.",
     ]
     return "\n".join(lines)

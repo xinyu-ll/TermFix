@@ -33,12 +33,28 @@ class ErrorEntry:
     updated_at: float = field(default_factory=time.time)
 
 
+@dataclass
+class PromptEntry:
+    """A manual user prompt scoped to one terminal session snapshot."""
+    session_id: str
+    context: dict
+    session: Optional[iterm2.Session] = None
+    id: str = field(default_factory=lambda: uuid4().hex)
+    timestamp: float = field(default_factory=time.time)
+    user_prompt: str = ""
+    result: Optional[str] = None
+    analysis_started: bool = False
+    status: str = "input"
+    updated_at: float = field(default_factory=time.time)
+
+
 class TermFixState:
     """Shared state between the monitor and the UI layer."""
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.errors: list[ErrorEntry] = []
+        self.prompts: list[PromptEntry] = []
 
         self.api_key: str = ""
         self.base_url: str = DEFAULT_BASE_URL
@@ -49,6 +65,7 @@ class TermFixState:
 
         self.component: Optional[iterm2.StatusBarComponent] = None
         self.connection: Optional[iterm2.Connection] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.status_server = None
         self.status_server_url: str = ""
         self.popover_last_seen: dict[str, float] = {}
@@ -65,6 +82,10 @@ class TermFixState:
             except ValueError:
                 pass
 
+    async def add_prompt(self, entry: PromptEntry) -> None:
+        async with self._lock:
+            self.prompts.append(entry)
+
     @property
     def error_count(self) -> int:
         return len(self.errors)
@@ -78,8 +99,22 @@ class TermFixState:
                 return entry
         return None
 
+    def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
+        for entry in reversed(self.prompts):
+            if entry.session_id == session_id:
+                return entry
+        return None
+
+    def get_prompt(self, entry_id: str) -> Optional[PromptEntry]:
+        for entry in self.prompts:
+            if entry.id == entry_id:
+                return entry
+        return None
+
     def refresh_analyzing(self) -> None:
-        self.analyzing = any(entry.status == "streaming" for entry in self.errors)
+        self.analyzing = any(entry.status == "streaming" for entry in self.errors) or any(
+            entry.status == "streaming" for entry in self.prompts
+        )
 
     def mark_popover_seen(self, entry_id: str) -> None:
         self.popover_last_seen[entry_id] = time.time()
