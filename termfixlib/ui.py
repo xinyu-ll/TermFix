@@ -908,6 +908,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     let timer = null;
     let closing = false;
     let submitted = false;
+    let composing = false;
 
     function reportClosed() {{
       try {{
@@ -1010,8 +1011,17 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       submitPrompt();
     }});
 
+    promptEl.addEventListener("compositionstart", () => {{
+      composing = true;
+    }});
+
+    promptEl.addEventListener("compositionend", () => {{
+      composing = false;
+    }});
+
     promptEl.addEventListener("keydown", (event) => {{
-      if (event.key === "Enter" && !event.shiftKey) {{
+      const isComposing = composing || event.isComposing || event.keyCode === 229;
+      if (event.key === "Enter" && !event.shiftKey && !isComposing) {{
         event.preventDefault();
         submitPrompt();
       }}
