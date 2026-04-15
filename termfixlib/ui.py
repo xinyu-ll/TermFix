@@ -98,7 +98,7 @@ async def register_status_bar(
     @iterm2.RPC
     async def _on_click(session_id):
         asyncio.create_task(
-            _handle_click(connection, session_id, state),
+            _handle_click(connection, session_id, state, toggle=False),
             name="termfix-click",
         )
 
@@ -139,7 +139,7 @@ async def start_hotkey_listener(
                     session_id = await _get_active_session_id(app)
                     logger.info("TermFix manual trigger — session=%s", session_id)
                     asyncio.create_task(
-                        _handle_click(connection, session_id, state),
+                        _handle_click(connection, session_id, state, toggle=True),
                         name="termfix-hotkey",
                     )
     except asyncio.CancelledError:
@@ -153,11 +153,17 @@ async def _handle_click(
     connection: iterm2.Connection,
     session_id: Optional[str],
     state: "TermFixState",
+    toggle: bool = False,
 ) -> None:
     """Start analysis if needed and open one live-updating popover."""
     entry = _pick_entry(state, session_id)
     if entry is None:
         await _open_info_popover(connection, session_id, state)
+        return
+
+    if toggle and state.is_popover_open(entry.id):
+        state.request_popover_close(entry.id)
+        logger.info("TermFix popover close requested — entry=%s", entry.id)
         return
 
     if not entry.analysis_started:
@@ -166,6 +172,7 @@ async def _handle_click(
     target_session_id = session_id or entry.session_id
     try:
         await _open_popover(connection, target_session_id, state, _build_live_html(entry, state))
+        state.mark_popover_seen(entry.id)
         await state.notify_ui_update()
     except Exception as exc:
         logger.error("Failed to open popover: %s", exc)
@@ -246,8 +253,21 @@ def _ensure_status_server(state: "TermFixState") -> None:
         def do_OPTIONS(self):  # noqa: N802 - BaseHTTPRequestHandler API.
             self._send_json({})
 
+        def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API.
+            self._handle_request()
+
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API.
+            self._handle_request()
+
+        def _handle_request(self) -> None:
             parsed = urlparse(self.path)
+            if parsed.path == "/closed":
+                entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                if entry_id:
+                    state.mark_popover_closed(entry_id)
+                self._send_json({"ok": True})
+                return
+
             if parsed.path != "/state":
                 self.send_error(404)
                 return
@@ -291,9 +311,11 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
             "ok": False,
             "status": "missing",
             "done": True,
+            "should_close": False,
             "body_html": "<p>This TermFix result is no longer available.</p>",
         }
 
+    state.mark_popover_seen(entry_id)
     markdown = entry.result or "Analyzing..."
     done = entry.status in ("done", "error", "cancelled")
     return {
@@ -301,6 +323,7 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
         "entry_id": entry.id,
         "status": entry.status,
         "done": done,
+        "should_close": state.consume_popover_close_request(entry_id),
         "updated_at": entry.updated_at,
         "body_html": _markdown_to_html(markdown),
     }
@@ -345,6 +368,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     exit_code = entry.exit_code
     body = _markdown_to_html(entry.result or "Analyzing...")
     endpoint = json.dumps(f"{state.status_server_url}/state?entry={entry.id}")
+    close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={entry.id}")
 
     return f"""\
 <!DOCTYPE html>
@@ -453,10 +477,34 @@ def _build_live_html(entry, state: "TermFixState") -> str:
   <div id="content" class="markdown">{body}</div>
   <script>
     const endpoint = {endpoint};
+    const closeEndpoint = {close_endpoint};
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
     let lastHtml = contentEl.innerHTML;
     let timer = null;
+    let closing = false;
+
+    function reportClosed() {{
+      try {{
+        if (navigator.sendBeacon) {{
+          navigator.sendBeacon(closeEndpoint);
+        }} else {{
+          fetch(closeEndpoint, {{ method: "POST", keepalive: true }});
+        }}
+      }} catch (error) {{
+        // Best effort only.
+      }}
+    }}
+
+    function closePopover() {{
+      closing = true;
+      if (timer) {{
+        clearInterval(timer);
+        timer = null;
+      }}
+      reportClosed();
+      window.close();
+    }}
 
     async function refresh() {{
       try {{
@@ -465,6 +513,10 @@ def _build_live_html(entry, state: "TermFixState") -> str:
           cache: "no-store"
         }});
         const data = await response.json();
+        if (data.should_close) {{
+          closePopover();
+          return;
+        }}
         if (data.body_html && data.body_html !== lastHtml) {{
           lastHtml = data.body_html;
           contentEl.innerHTML = data.body_html;
@@ -473,15 +525,25 @@ def _build_live_html(entry, state: "TermFixState") -> str:
           statusEl.textContent = data.status;
           statusEl.className = "status " + data.status;
         }}
-        if (data.done && timer) {{
-          clearInterval(timer);
-          timer = null;
-        }}
       }} catch (error) {{
         statusEl.textContent = "offline";
         statusEl.className = "status error";
       }}
     }}
+
+    document.addEventListener("keydown", (event) => {{
+      if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
+          event.key && event.key.toLowerCase() === "j") {{
+        event.preventDefault();
+        closePopover();
+      }}
+    }});
+
+    window.addEventListener("pagehide", () => {{
+      if (!closing) {{
+        reportClosed();
+      }}
+    }});
 
     refresh();
     timer = setInterval(refresh, 350);

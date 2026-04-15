@@ -51,6 +51,8 @@ class TermFixState:
         self.connection: Optional[iterm2.Connection] = None
         self.status_server = None
         self.status_server_url: str = ""
+        self.popover_last_seen: dict[str, float] = {}
+        self.popover_close_requests: set[str] = set()
 
     async def add_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
@@ -78,6 +80,26 @@ class TermFixState:
 
     def refresh_analyzing(self) -> None:
         self.analyzing = any(entry.status == "streaming" for entry in self.errors)
+
+    def mark_popover_seen(self, entry_id: str) -> None:
+        self.popover_last_seen[entry_id] = time.time()
+
+    def is_popover_open(self, entry_id: str, ttl: float = 1.5) -> bool:
+        last_seen = self.popover_last_seen.get(entry_id, 0)
+        return time.time() - last_seen < ttl
+
+    def request_popover_close(self, entry_id: str) -> None:
+        self.popover_close_requests.add(entry_id)
+
+    def consume_popover_close_request(self, entry_id: str) -> bool:
+        if entry_id not in self.popover_close_requests:
+            return False
+        self.popover_close_requests.remove(entry_id)
+        return True
+
+    def mark_popover_closed(self, entry_id: str) -> None:
+        self.popover_last_seen.pop(entry_id, None)
+        self.popover_close_requests.discard(entry_id)
 
     async def notify_ui_update(self) -> None:
         """Ask the status bar component to re-render and update the badge."""
