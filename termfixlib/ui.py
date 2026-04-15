@@ -1380,11 +1380,39 @@ def _markdown_to_html(markdown: str) -> str:
 
 
 def _inline_markdown(text: str) -> str:
-    """Render inline code and bold markers in escaped text."""
-    escaped = html.escape(text)
-    parts = escaped.split("`")
-    for i in range(1, len(parts), 2):
-        parts[i] = f"<code>{parts[i]}</code>"
-    escaped = "".join(parts)
-    escaped = escaped.replace("**", "")
-    return escaped
+    """Render inline code and bold markers."""
+    parts = text.split("`")
+    rendered: list[str] = []
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            rendered.append(f"<code>{html.escape(part)}</code>")
+        else:
+            rendered.append(_inline_bold_to_html(part))
+    return "".join(rendered)
+
+
+def _inline_bold_to_html(text: str) -> str:
+    """Render non-empty **bold** spans while preserving literal asterisks."""
+    rendered: list[str] = []
+    pos = 0
+
+    while pos < len(text):
+        start = text.find("**", pos)
+        if start == -1:
+            rendered.append(html.escape(text[pos:]))
+            break
+
+        end = text.find("**", start + 2)
+        if end == -1:
+            rendered.append(html.escape(text[pos:]))
+            break
+
+        content = text[start + 2:end]
+        rendered.append(html.escape(text[pos:start]))
+        if content.strip():
+            rendered.append(f"<strong>{html.escape(content)}</strong>")
+        else:
+            rendered.append(html.escape(text[start:end + 2]))
+        pos = end + 2
+
+    return "".join(rendered)
