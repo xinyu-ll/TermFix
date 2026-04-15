@@ -25,19 +25,7 @@ async def collect_context(
     command: Optional[str] = None,
     exit_code: int = 1,
 ) -> dict:
-    """Return a structured dict describing the failing command's environment.
-
-    Args:
-        connection: Active iTerm2 connection.
-        session:    The session where the command failed.
-        context_lines: How many terminal lines to capture for output context.
-        command:    The command string that was run (from shell integration).
-        exit_code:  The numeric exit code of the failed command.
-
-    Returns:
-        Dict with keys: command, exit_code, terminal_output, cwd, shell,
-        os_name, os_version.
-    """
+    """Return a structured dict describing the failing command's environment."""
     ctx: dict = {
         "command": command or "",
         "exit_code": exit_code,
@@ -48,13 +36,9 @@ async def collect_context(
         "os_version": platform.release(),
     }
 
-    # ── Terminal output ────────────────────────────────────────────────────
     ctx["terminal_output"] = await _get_terminal_output(session, context_lines)
-
-    # ── Current working directory ──────────────────────────────────────────
     ctx["cwd"] = await _get_variable(session, "path") or ""
 
-    # ── Shell type ────────────────────────────────────────────────────────
     shell_var = await _get_variable(session, "shell")
     if shell_var:
         ctx["shell"] = os.path.basename(shell_var)
@@ -64,21 +48,10 @@ async def collect_context(
     return ctx
 
 
-# ── Private helpers ────────────────────────────────────────────────────────
-
 async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
-    """Capture the last *max_lines* lines visible on the terminal screen.
-
-    iTerm2 exposes two complementary APIs:
-      • session.async_get_screen_contents()  — current visible screen
-      • session.async_get_contents(r0, r1)   — arbitrary scrollback range
-
-    We try async_get_screen_contents first (most portable), then fall back to
-    async_get_contents if the first call is unavailable.
-    """
+    """Capture the last *max_lines* lines visible on the terminal screen."""
     lines: list[str] = []
 
-    # Attempt 1: screen contents (current visible buffer)
     try:
         screen: iterm2.ScreenContents = await session.async_get_screen_contents()
         for i in range(screen.number_of_lines):
@@ -87,19 +60,13 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
             lines.append(text.rstrip())
         return "\n".join(lines[-max_lines:])
     except AttributeError:
-        # async_get_screen_contents might not exist in all API versions
         logger.debug("async_get_screen_contents unavailable, trying async_get_contents")
     except Exception as exc:
         logger.warning("Could not get screen contents via async_get_screen_contents: %s", exc)
 
-    # Attempt 2: explicit row range via async_get_contents(first_row, last_row)
-    # We can't reliably probe the scrollback height on older API versions, so
-    # request a deliberately oversized range (0 … _LARGE).  iTerm2 clamps the
-    # result to whatever is actually available, giving us all scrollback lines.
-    # We then take only the last max_lines from that full result.
-    _LARGE = 100_000
+    large = 100_000
     try:
-        contents = await session.async_get_contents(0, _LARGE)
+        contents = await session.async_get_contents(0, large)
         for i in range(contents.number_of_lines):
             line = contents.line(i)
             text = line.string if line.string else ""
@@ -135,6 +102,6 @@ def build_user_message(ctx: dict) -> str:
         ctx["terminal_output"] or "(no output captured)",
         "---",
         "",
-        "Analyze the error above and return your JSON response.",
+        "Analyze the error above and return your Markdown response.",
     ]
     return "\n".join(lines)
