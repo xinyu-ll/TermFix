@@ -779,13 +779,20 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
   <meta charset="UTF-8">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    html {{
+      height: 100%;
+    }}
     body {{
       font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
       font-size: 13px;
       color: #1c1c1e;
       background: #ffffff;
-      padding: 14px 16px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 14px 16px 12px;
       line-height: 1.45;
+      overflow: hidden;
     }}
     header {{
       display: flex;
@@ -811,7 +818,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       display: flex;
       gap: 8px;
       align-items: flex-start;
-      margin-bottom: 12px;
+      padding-top: 10px;
+      border-top: 1px solid #e5e5ea;
     }}
     textarea {{
       flex: 1;
@@ -853,7 +861,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       display: flex;
       flex-direction: column;
       gap: 12px;
-      padding-bottom: 4px;
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 0 2px 12px 0;
     }}
     .turn {{
       display: flex;
@@ -931,11 +942,11 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
 
+  <div id="content" class="conversation">{body}</div>
   <form id="prompt-form">
     <textarea id="prompt-input" placeholder="Ask about this terminal session" autofocus></textarea>
     <button id="send-button" type="submit">Send</button>
   </form>
-  <div id="content" class="conversation">{body}</div>
 
   <script>
     const endpoint = {endpoint};
@@ -993,6 +1004,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         .replace(/'/g, "&#39;");
     }}
 
+    function scrollContentToBottom() {{
+      contentEl.scrollTop = contentEl.scrollHeight;
+    }}
+
     async function refresh() {{
       try {{
         const sep = endpoint.includes("?") ? "&" : "?";
@@ -1007,6 +1022,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         if (typeof data.body_html === "string" && data.body_html !== lastHtml) {{
           lastHtml = data.body_html;
           contentEl.innerHTML = data.body_html;
+          scrollContentToBottom();
         }}
         setStatus(data.status);
         if (data.done && timer) {{
@@ -1095,6 +1111,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }});
 
     refresh();
+    scrollContentToBottom();
     promptEl.focus();
   </script>
 </body>
