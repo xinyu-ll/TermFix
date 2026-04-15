@@ -213,6 +213,7 @@ async def _handle_prompt_hotkey(
         return
 
     try:
+        _attach_prompt_history_to_session(state, session_id, session)
         entry = await _pick_or_create_prompt_entry(state, session_id, session)
         await _open_popover(
             connection,
@@ -241,6 +242,18 @@ async def _pick_or_create_prompt_entry(
     entry = PromptEntry(session_id=session_id, context={}, session=session)
     await state.add_prompt(entry)
     return entry
+
+
+def _attach_prompt_history_to_session(
+    state: "TermFixState",
+    session_id: str,
+    session,
+) -> None:
+    """Make persisted prompt history resumable from the current iTerm2 session."""
+    for entry in state.prompts:
+        if entry.status != "streaming":
+            entry.session_id = session_id
+            entry.session = session
 
 
 def _start_analysis_task(entry, state: "TermFixState") -> None:
@@ -348,6 +361,7 @@ async def _run_streaming_prompt(entry: PromptEntry, state: "TermFixState") -> No
             entry.result = None
         entry.status = "done"
         entry.updated_at = time.time()
+        state.save_prompt_history()
     except asyncio.CancelledError:
         entry.status = "cancelled"
         entry.updated_at = time.time()
@@ -596,6 +610,7 @@ async def _submit_prompt_entry(entry_id: str, prompt: str, state: "TermFixState"
     entry.messages.append({"role": "user", "content": prompt})
     entry.result = "Analyzing..."
     entry.updated_at = time.time()
+    state.save_prompt_history()
     _start_prompt_analysis_task(entry, state)
     await state.notify_ui_update()
     return {"ok": True}

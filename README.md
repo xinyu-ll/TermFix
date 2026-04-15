@@ -129,7 +129,7 @@ DeepSeek 推荐填写：
 
 按 `Cmd+L` 会在当前 iTerm2 session 打开一个输入弹窗。输入自己的 prompt 后按 `Enter` 发送，`Shift+Enter` 可换行。模型回复完成后，输入框会重新启用，可以继续追问。
 
-弹窗左侧会显示当前 session 的对话历史。点击历史项可以 resume 之前的对话；点击 **New** 可以开始新对话。
+弹窗左侧会显示已保存的对话历史。点击历史项可以 resume 之前的对话；点击 **New** 可以开始新对话。历史会固定保存到 `~/Library/Application Support/TermFix/prompt_history.json`，iTerm2 脚本重启后仍可恢复。
 
 这类请求不会增加错误计数。模型消息结构为：
 

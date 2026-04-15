@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -11,10 +13,40 @@ from uuid import uuid4
 
 import iterm2
 
-from .config import DEFAULT_BASE_URL, DEFAULT_CONTEXT_LINES, DEFAULT_MODEL
+from .config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_CONTEXT_LINES,
+    DEFAULT_MODEL,
+    PROMPT_HISTORY_LIMIT,
+    PROMPT_HISTORY_PATH,
+)
 from .context import collect_context
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_float(value, default: float) -> float:  # noqa: ANN001 - JSON payload input.
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _serializable_messages(messages) -> list[dict]:  # noqa: ANN001 - JSON payload input.
+    """Return only provider-safe user/assistant text messages."""
+    cleaned: list[dict] = []
+    if not isinstance(messages, list):
+        return cleaned
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = str(message.get("content") or "")
+        if content:
+            cleaned.append({"role": role, "content": content})
+    return cleaned
 
 
 @dataclass
@@ -55,7 +87,7 @@ class TermFixState:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.errors: list[ErrorEntry] = []
-        self.prompts: list[PromptEntry] = []
+        self.prompts: list[PromptEntry] = self._load_prompt_history()
 
         self.api_key: str = ""
         self.base_url: str = DEFAULT_BASE_URL
@@ -86,6 +118,7 @@ class TermFixState:
     async def add_prompt(self, entry: PromptEntry) -> None:
         async with self._lock:
             self.prompts.append(entry)
+            self._trim_prompt_history()
 
     @property
     def error_count(self) -> int:
@@ -106,6 +139,9 @@ class TermFixState:
                 return entry
         return None
 
+    def latest_prompt_any(self) -> Optional[PromptEntry]:
+        return self.prompts[-1] if self.prompts else None
+
     def get_prompt(self, entry_id: str) -> Optional[PromptEntry]:
         for entry in self.prompts:
             if entry.id == entry_id:
@@ -116,6 +152,74 @@ class TermFixState:
         self.analyzing = any(entry.status == "streaming" for entry in self.errors) or any(
             entry.status == "streaming" for entry in self.prompts
         )
+
+    def save_prompt_history(self) -> None:
+        """Persist prompt conversations to a fixed on-disk JSON file."""
+        self._trim_prompt_history()
+        records = []
+        for entry in self.prompts:
+            if not entry.messages:
+                continue
+            records.append(
+                {
+                    "id": entry.id,
+                    "timestamp": entry.timestamp,
+                    "updated_at": entry.updated_at,
+                    "messages": _serializable_messages(entry.messages),
+                }
+            )
+
+        try:
+            os.makedirs(os.path.dirname(PROMPT_HISTORY_PATH), exist_ok=True)
+            tmp_path = f"{PROMPT_HISTORY_PATH}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"version": 1, "prompts": records[-PROMPT_HISTORY_LIMIT:]},
+                    fh,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            os.replace(tmp_path, PROMPT_HISTORY_PATH)
+        except Exception as exc:
+            logger.warning("Could not save prompt history: %s", exc)
+
+    def _load_prompt_history(self) -> list[PromptEntry]:
+        """Load persisted prompt conversations from disk."""
+        try:
+            with open(PROMPT_HISTORY_PATH, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except FileNotFoundError:
+            return []
+        except Exception as exc:
+            logger.warning("Could not load prompt history: %s", exc)
+            return []
+
+        prompts = payload.get("prompts", []) if isinstance(payload, dict) else []
+        entries: list[PromptEntry] = []
+        for item in prompts:
+            if not isinstance(item, dict):
+                continue
+            messages = _serializable_messages(item.get("messages", []))
+            if not messages:
+                continue
+            entry = PromptEntry(
+                session_id="",
+                context={},
+                messages=messages,
+                id=str(item.get("id") or uuid4().hex),
+                timestamp=_safe_float(item.get("timestamp"), time.time()),
+                updated_at=_safe_float(item.get("updated_at"), time.time()),
+                status="done",
+            )
+            entries.append(entry)
+
+        entries.sort(key=lambda entry: entry.updated_at)
+        return entries[-PROMPT_HISTORY_LIMIT:]
+
+    def _trim_prompt_history(self) -> None:
+        if len(self.prompts) <= PROMPT_HISTORY_LIMIT:
+            return
+        self.prompts = self.prompts[-PROMPT_HISTORY_LIMIT:]
 
     def mark_popover_seen(self, entry_id: str) -> None:
         self.popover_last_seen[entry_id] = time.time()

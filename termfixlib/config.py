@@ -1,5 +1,7 @@
 """TermFix configuration constants and defaults."""
 
+import os
+
 # Status bar
 STATUS_IDENTIFIER = "com.termfix.status"
 STATUS_NORMAL = "✅"
@@ -10,6 +12,12 @@ POPOVER_WIDTH = 450
 POPOVER_HEIGHT = 350
 PROMPT_POPOVER_WIDTH = 640
 PROMPT_POPOVER_HEIGHT = 480
+
+# Persistent prompt conversation history
+PROMPT_HISTORY_PATH = os.path.expanduser(
+    "~/Library/Application Support/TermFix/prompt_history.json"
+)
+PROMPT_HISTORY_LIMIT = 100
 
 # Defaults (overridden by StatusBar knobs at runtime)
 DEFAULT_BASE_URL = "https://api.deepseek.com"
