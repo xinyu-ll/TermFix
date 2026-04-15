@@ -85,6 +85,14 @@ class TermFixState:
         async with self._lock:
             self.errors.clear()
 
+    async def remove_error(self, entry: "ErrorEntry") -> None:
+        """Remove a single error entry (by identity) from the list."""
+        async with self._lock:
+            try:
+                self.errors.remove(entry)
+            except ValueError:
+                pass  # already removed (e.g. concurrent click)
+
     # ── Read helpers (no lock needed for simple reads) ─────────────────────
 
     @property
@@ -252,7 +260,9 @@ async def _session_worker(
     and logged so one broken session never affects others.
     """
     session_id = session.session_id
-    current_command: str = ""
+    # Mutable one-element list so _handle_notification can update the command
+    # string across iterations.  Must be created once outside the loop.
+    current_command_ref: list[str] = [""]
 
     logger.debug("Worker started for session %s", session_id)
     try:
@@ -262,10 +272,8 @@ async def _session_worker(
                 await _handle_notification(
                     connection, session, state,
                     mode, notification,
-                    current_command_ref=[current_command],
+                    current_command_ref=current_command_ref,
                 )
-                # Update mutable reference from the helper
-                # (Python doesn't have pass-by-reference for str, so use a list)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

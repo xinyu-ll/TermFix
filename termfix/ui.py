@@ -166,8 +166,9 @@ async def _handle_click(
             html=html_content,
             size=iterm2.Size(POPOVER_WIDTH, POPOVER_HEIGHT),
         )
-        # Clear errors once the user has acknowledged them
-        await state.clear_errors()
+        # Remove only the entry that was just shown; other pending errors stay
+        # in the queue so the badge count remains accurate.
+        await state.remove_error(entry)
         await state.notify_ui_update()
     except Exception as exc:
         logger.error("Failed to open popover: %s", exc)
@@ -300,9 +301,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     """Push current knob values into shared state."""
     if not isinstance(knobs, dict):
         return
-    api_key = knobs.get("api_key", "").strip()
-    if api_key:
-        state.api_key = api_key
+    # Always write api_key so the user can clear/rotate it; an empty string
+    # will surface as a "no API key" error on the next click, which is correct.
+    state.api_key = knobs.get("api_key", "").strip()
 
     model = knobs.get("model", "").strip()
     if model:
