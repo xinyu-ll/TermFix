@@ -8,6 +8,8 @@ STATUS_ERROR_FMT = "🔴 Fix ({count})"
 # Popover dimensions
 POPOVER_WIDTH = 450
 POPOVER_HEIGHT = 350
+PROMPT_POPOVER_WIDTH = 640
+PROMPT_POPOVER_HEIGHT = 480
 
 # Defaults (overridden by StatusBar knobs at runtime)
 DEFAULT_BASE_URL = "https://api.deepseek.com"

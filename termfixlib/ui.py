@@ -25,6 +25,8 @@ from .config import (
     DEFAULT_MODEL,
     POPOVER_HEIGHT,
     POPOVER_WIDTH,
+    PROMPT_POPOVER_HEIGHT,
+    PROMPT_POPOVER_WIDTH,
     STATUS_ERROR_FMT,
     STATUS_IDENTIFIER,
     STATUS_NORMAL,
@@ -212,7 +214,13 @@ async def _handle_prompt_hotkey(
 
     try:
         entry = await _pick_or_create_prompt_entry(state, session_id, session)
-        await _open_popover(connection, session_id, state, _build_prompt_html(entry, state))
+        await _open_popover(
+            connection,
+            session_id,
+            state,
+            _build_prompt_html(entry, state),
+            size=iterm2.Size(PROMPT_POPOVER_WIDTH, PROMPT_POPOVER_HEIGHT),
+        )
         state.mark_popover_seen(_PROMPT_POPOVER_ID)
         state.mark_popover_seen(entry.id)
     except Exception as exc:
@@ -1437,13 +1445,15 @@ async def _open_popover(
     session_id: str,
     state: "TermFixState",
     html_content: str,
+    size: Optional[iterm2.Size] = None,
 ) -> None:
     """Open a popover using the registered component when available."""
+    popover_size = size or iterm2.Size(POPOVER_WIDTH, POPOVER_HEIGHT)
     if state.component is not None:
         await state.component.async_open_popover(
             session_id=session_id,
             html=html_content,
-            size=iterm2.Size(POPOVER_WIDTH, POPOVER_HEIGHT),
+            size=popover_size,
         )
         return
 
@@ -1451,7 +1461,7 @@ async def _open_popover(
         connection=connection,
         session_id=session_id,
         html=html_content,
-        size=iterm2.Size(POPOVER_WIDTH, POPOVER_HEIGHT),
+        size=popover_size,
     )
 
 
