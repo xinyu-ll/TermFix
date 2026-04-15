@@ -10,14 +10,12 @@ POPOVER_WIDTH = 450
 POPOVER_HEIGHT = 350
 
 # Defaults (overridden by StatusBar knobs at runtime)
-DEFAULT_MODEL = "claude-opus-4-6"
+DEFAULT_BASE_URL = "https://api.deepseek.com"
+DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_CONTEXT_LINES = 50
 
-# System prompt for Claude — kept stable so prompt caching applies across requests.
-# NOTE: Opus 4.6 requires ≥4096 tokens to activate prefix caching. This prompt is
-# shorter than that threshold, so cache writes will be skipped silently. To benefit
-# from caching in production, append a large knowledge base or few-shot examples
-# before the closing line.
+# System prompt for a terminal error analysis assistant. Keep this stable so
+# responses remain consistent across providers and model changes.
 SYSTEM_PROMPT = """\
 You are TermFix, an expert terminal error analysis assistant integrated into iTerm2.
 

@@ -1,9 +1,9 @@
 """
 LLM client for TermFix.
 
-Uses the OpenAI-compatible endpoint exposed by Anthropic
-(https://api.anthropic.com/v1/) so that any OpenAI-SDK-compatible
-client can talk to Claude models without the Anthropic SDK.
+Uses an OpenAI-compatible chat completions endpoint so TermFix can work with
+providers like DeepSeek, OpenAI, Anthropic-compatible gateways, or self-hosted
+proxies without changing the rest of the plugin.
 
   • Streaming — collects chunks to avoid HTTP timeouts on long outputs
   • System message — stable SYSTEM_PROMPT sent as role:system turn
@@ -14,17 +14,16 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Optional
 
-import openai
+try:
+    import openai
+except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment
+    openai = None
 
-from config import DEFAULT_MODEL, SYSTEM_PROMPT
+from config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
 from context import build_user_message
 
 logger = logging.getLogger(__name__)
-
-# Anthropic's OpenAI-compatible base URL
-_API_BASE_URL = "https://api.anthropic.com/v1/"
 
 # ── Type alias for the structured result ──────────────────────────────────
 
@@ -42,14 +41,16 @@ _EMPTY_RESULT: AnalysisResult = {
 async def analyze_error(
     context: dict,
     api_key: str,
+    base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
 ) -> AnalysisResult:
-    """Call Claude via the OpenAI-compatible endpoint and return a structured result.
+    """Call an OpenAI-compatible endpoint and return a structured result.
 
     Args:
         context:  Dict produced by context.collect_context().
-        api_key:  Anthropic API key (read from StatusBar knob at call time).
-        model:    Model ID string; defaults to claude-opus-4-6.
+        api_key:  API key read from the StatusBar knob at call time.
+        base_url: Base URL for the compatible API endpoint.
+        model:    Model ID string; defaults to deepseek-chat.
 
     Returns:
         AnalysisResult dict with keys "cause", "fix_commands", "explanation".
@@ -61,17 +62,28 @@ async def analyze_error(
         return {
             **_EMPTY_RESULT,
             "cause": "No API key set. Click the TermFix status bar component → "
-                     "configure the 'API Key' knob with your Anthropic key.",
+                     "configure the 'API Key' knob with your provider key.",
         }
 
     user_message = build_user_message(context)
 
+    if openai is None:
+        logger.error("openai package is not installed in the active Python runtime")
+        return {
+            **_EMPTY_RESULT,
+            "cause": "The `openai` package is not installed in iTerm2's Python runtime.",
+            "explanation": (
+                "Open iTerm2 -> Scripts -> Manage Dependencies and install `openai`, "
+                "then restart the TermFix script."
+            ),
+        }
+
     try:
-        result = await _call_api(api_key, model, user_message)
+        result = await _call_api(api_key, base_url, model, user_message)
         return result
     except openai.AuthenticationError:
         logger.error("Authentication failed — check API key")
-        return {**_EMPTY_RESULT, "cause": "Authentication failed. Verify your Anthropic API key."}
+        return {**_EMPTY_RESULT, "cause": "Authentication failed. Verify your API key."}
     except openai.RateLimitError:
         logger.warning("Rate limit hit")
         return {**_EMPTY_RESULT, "cause": "Rate limited by API. Please wait and try again."}
@@ -90,13 +102,14 @@ async def analyze_error(
 
 async def _call_api(
     api_key: str,
+    base_url: str,
     model: str,
     user_message: str,
 ) -> AnalysisResult:
     """Make the actual streaming API call and parse the JSON response."""
     client = openai.AsyncOpenAI(
         api_key=api_key,
-        base_url=_API_BASE_URL,
+        base_url=_normalise_base_url(base_url),
     )
 
     # Collect streamed chunks to avoid HTTP timeouts on long outputs.
@@ -135,7 +148,7 @@ def _parse_json(raw: str) -> AnalysisResult:
     except json.JSONDecodeError:
         logger.warning("LLM returned non-JSON response; wrapping as explanation")
         return {
-            "cause": "Could not parse structured response from Claude.",
+            "cause": "Could not parse a structured response from the model.",
             "fix_commands": [],
             "explanation": raw,
         }
@@ -146,3 +159,11 @@ def _parse_json(raw: str) -> AnalysisResult:
         "fix_commands": [str(c) for c in data.get("fix_commands", [])],
         "explanation": str(data.get("explanation", "")),
     }
+
+
+def _normalise_base_url(base_url: str) -> str:
+    """Accept provider URLs with or without a trailing slash."""
+    cleaned = (base_url or "").strip()
+    if not cleaned:
+        return DEFAULT_BASE_URL
+    return cleaned.rstrip("/")

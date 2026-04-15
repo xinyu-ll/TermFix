@@ -4,15 +4,16 @@ TermFix — iTerm2 Long-Running Daemon
 =====================================
 Monitors every shell session for failed commands (exit code ≠ 0).
 When a failure is detected, a red status-bar badge appears.
-Clicking it calls the Claude API and presents fix suggestions in a popover.
+Clicking it calls an OpenAI-compatible API and presents fix suggestions in a
+popover.
 
 Installation
 ────────────
-1. Copy this entire *termfix/* directory to:
-       ~/Library/ApplicationSupport/iTerm2/Scripts/AutoLaunch/termfix/
+1. Copy the Python files from *termfix/* to:
+       ~/Library/Application Support/iTerm2/Scripts/AutoLaunch/
 
    The directory should look like:
-       termfix/
+       AutoLaunch/
        ├── termfix.py          ← this file (the daemon entry point)
        ├── monitor.py
        ├── context.py
@@ -21,26 +22,26 @@ Installation
        └── config.py
 
 2. Ensure the required packages are installed for iTerm2's Python runtime:
-       ~/.iterm2_venv/bin/pip install anthropic
+       ~/.iterm2_venv/bin/pip install openai
 
    Or, if you use a system Python:
-       pip3 install anthropic
+       pip3 install openai
 
-3. In iTerm2: Scripts ▸ AutoLaunch ▸ termfix/termfix.py
+3. In iTerm2: Scripts ▸ AutoLaunch ▸ termfix.py
    (or restart iTerm2 — AutoLaunch scripts start automatically)
 
 4. After the script starts, add the "TermFix" component to your status bar:
        iTerm2 ▸ Preferences ▸ Profiles ▸ Session ▸ Configure Status Bar
    Drag "TermFix" into the active components area.
 
-5. Click the component to open its knobs and paste your Anthropic API key.
+5. Click the component to open its knobs and configure Base URL / API Key / Model.
 
 Prerequisites
 ─────────────
 • iTerm2 ≥ 3.4 with Python API enabled (Preferences ▸ General ▸ Magic)
 • Shell Integration installed in each session you want to monitor
   (iTerm2 ▸ Install Shell Integration)
-• Python ≥ 3.8 with the `anthropic` package installed
+• Python ≥ 3.8 with the `openai` package installed
 
 How it works
 ────────────
@@ -65,7 +66,7 @@ How it works
                                    ▼
                     ┌──────────────────────────────────┐
                     │  analyze_error()  [lazy, cached] │
-                    │  Claude API (streaming + cache)  │
+                    │  Compatible API (streaming)      │
                     └──────────────┬───────────────────┘
                                    │
                                    ▼

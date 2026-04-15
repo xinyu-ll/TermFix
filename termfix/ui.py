@@ -2,9 +2,10 @@
 StatusBar component and popover UI for TermFix.
 
 Registers a persistent status bar component (identifier: com.termfix.status)
-with three user-configurable knobs:
-  • API Key       — Anthropic API key
-  • Model         — Claude model ID (default: claude-opus-4-6)
+with four user-configurable knobs:
+  • Base URL      — OpenAI-compatible API base URL
+  • API Key       — provider API key
+  • Model         — model ID (default: deepseek-chat)
   • Context Lines — how many terminal lines to capture (default: 50)
 
 Display logic:
@@ -29,6 +30,7 @@ from typing import Optional
 import iterm2
 
 from config import (
+    DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LINES,
     DEFAULT_MODEL,
     POPOVER_HEIGHT,
@@ -57,8 +59,14 @@ async def register_status_bar(
 
     knobs = [
         iterm2.StringKnob(
+            name="Base URL",
+            placeholder=DEFAULT_BASE_URL,
+            default_value=DEFAULT_BASE_URL,
+            key="base_url",
+        ),
+        iterm2.StringKnob(
             name="API Key",
-            placeholder="sk-ant-…",
+            placeholder="sk-xxxx",
             default_value="",
             key="api_key",
         ),
@@ -79,7 +87,7 @@ async def register_status_bar(
     component = iterm2.StatusBarComponent(
         short_description="TermFix",
         detailed_description=(
-            "Analyses failed commands and shows Claude-powered fix suggestions."
+            "Analyses failed commands and shows fix suggestions via an OpenAI-compatible API."
         ),
         knobs=knobs,
         icons=[],
@@ -132,13 +140,14 @@ async def _handle_click(
         # No errors recorded yet — nothing to show
         return
 
-    # Analyse lazily: call Claude only on the first click for this entry
+    # Analyse lazily: call the configured model only on the first click.
     if not entry.analyzed:
         entry.analyzed = True  # guard against concurrent double-clicks
         try:
             entry.result = await analyze_error(
                 entry.context,
                 api_key=state.api_key,
+                base_url=state.base_url,
                 model=state.model,
             )
         except Exception as exc:
@@ -303,6 +312,10 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         return
     # Always write api_key so the user can clear/rotate it; an empty string
     # will surface as a "no API key" error on the next click, which is correct.
+    base_url = knobs.get("base_url", "").strip()
+    if base_url:
+        state.base_url = base_url
+
     state.api_key = knobs.get("api_key", "").strip()
 
     model = knobs.get("model", "").strip()

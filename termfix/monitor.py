@@ -38,7 +38,7 @@ from typing import Any, Dict, Optional
 
 import iterm2
 
-from config import DEFAULT_CONTEXT_LINES
+from config import DEFAULT_BASE_URL, DEFAULT_CONTEXT_LINES, DEFAULT_MODEL
 from context import collect_context
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,8 @@ class TermFixState:
 
         # Knob values written by the StatusBar component callback:
         self.api_key: str = ""
-        self.model: str = "claude-opus-4-6"
+        self.base_url: str = DEFAULT_BASE_URL
+        self.model: str = DEFAULT_MODEL
         self.context_lines: int = DEFAULT_CONTEXT_LINES
 
         # Set after component registration so the monitor can trigger refreshes:

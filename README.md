@@ -1,6 +1,6 @@
 # TermFix
 
-iTerm2 插件，自动捕获命令失败（exit code ≠ 0），通过 Claude API 分析错误原因，在状态栏弹窗中展示修复建议。
+iTerm2 插件，自动捕获命令失败（exit code ≠ 0），通过 OpenAI 兼容 API 分析错误原因，在状态栏弹窗中展示修复建议。
 
 ## 效果
 
@@ -9,7 +9,7 @@ iTerm2 插件，自动捕获命令失败（exit code ≠ 0），通过 Claude AP
 有错误时   🔴 Fix (2)   ← 角标显示未处理的错误数量
 ```
 
-点击 `🔴 Fix (2)` 后，Claude 分析失败命令并弹出：
+点击 `🔴 Fix (2)` 后，模型分析失败命令并弹出：
 
 - **错误原因** — 简洁的根因说明
 - **修复命令** — 可直接执行的 shell 命令
@@ -22,7 +22,7 @@ iTerm2 插件，自动捕获命令失败（exit code ≠ 0），通过 Claude AP
 | iTerm2 | ≥ 3.4，需开启 Python API |
 | Python | ≥ 3.8（iTerm2 内置运行时或系统 Python） |
 | Shell Integration | 需在每个 session 中安装 |
-| Anthropic API Key | [console.anthropic.com](https://console.anthropic.com) 获取 |
+| 兼容 OpenAI 的 API Key | 例如 DeepSeek 控制台生成的 key |
 
 ## 安装
 
@@ -38,13 +38,13 @@ iTerm2 插件，自动捕获命令失败（exit code ≠ 0），通过 Claude AP
 ### 第三步：复制插件文件
 
 ```bash
-cp -r termfix/ ~/Library/ApplicationSupport/iTerm2/Scripts/AutoLaunch/
+cp -R termfix/*.py ~/Library/Application\ Support/iTerm2/Scripts/AutoLaunch/
 ```
 
 目录结构应为：
 
 ```
-~/Library/ApplicationSupport/iTerm2/Scripts/AutoLaunch/termfix/
+~/Library/Application Support/iTerm2/Scripts/AutoLaunch/
 ├── termfix.py        ← 入口文件
 ├── monitor.py
 ├── context.py
@@ -53,23 +53,23 @@ cp -r termfix/ ~/Library/ApplicationSupport/iTerm2/Scripts/AutoLaunch/
 └── config.py
 ```
 
-### 第四步：安装 `anthropic` 依赖
+### 第四步：安装 `openai` 依赖
 
 优先使用 iTerm2 内置的 Python 运行时：
 
 ```bash
-~/.iterm2_venv/bin/pip install anthropic
+~/.iterm2_venv/bin/pip install openai
 ```
 
 如果上述路径不存在，使用系统 Python：
 
 ```bash
-pip3 install anthropic
+pip3 install openai
 ```
 
 ### 第五步：启动脚本
 
-**iTerm2 → Scripts → AutoLaunch → termfix/termfix.py**
+**iTerm2 → Scripts → AutoLaunch → termfix.py**
 
 或直接重启 iTerm2——AutoLaunch 目录下的脚本会自动运行。
 
@@ -82,15 +82,26 @@ pip3 install anthropic
 3. 将 **TermFix** 从组件列表拖入激活区域
 4. 点击 **OK**
 
-### 第七步：配置 API Key
+### 第七步：配置兼容 API
 
 点击状态栏中的 TermFix 组件，选择 **Configure**（或在 Status Bar 设置中双击组件），填写以下 knob：
 
 | Knob | 说明 | 默认值 |
 |------|------|--------|
-| **API Key** | Anthropic API Key（`sk-ant-…`） | 空，**必填** |
-| **Model** | 使用的 Claude 模型 | `claude-opus-4-6` |
+| **Base URL** | OpenAI 兼容接口地址 | `https://api.deepseek.com` |
+| **API Key** | 提供商 API Key | 空，**必填** |
+| **Model** | 使用的模型 | `deepseek-chat` |
 | **Context Lines** | 捕获的终端行数 | `50` |
+
+DeepSeek 推荐填写：
+
+| 字段 | 值 |
+|------|----|
+| `base_url` | `https://api.deepseek.com` |
+| `api_key` | `sk-xxxx` |
+| `model` | `deepseek-chat` |
+
+如果你想要更强推理，也可以把 `model` 改成 `deepseek-reasoner`。
 
 ## 使用方式
 
@@ -105,7 +116,7 @@ pip3 install anthropic
 
 2. 状态栏从 `✅` 变为 `🔴 Fix (1)`
 
-3. 点击图标，稍等片刻（首次点击调用 Claude API），弹窗展示分析结果
+3. 点击图标，稍等片刻（首次点击调用兼容 API），弹窗展示分析结果
 
 4. 弹窗关闭后错误计数清零，状态栏恢复 `✅`
 
@@ -117,7 +128,7 @@ termfix/
 ├── monitor.py      TermFixState 共享状态；全局 PromptMonitor 路由器；
 │                   per-session asyncio worker task
 ├── context.py      从 iTerm2 session 收集终端输出、CWD、shell 类型
-├── llm_client.py   AsyncAnthropic 调用（流式 + prompt caching）
+├── llm_client.py   OpenAI 兼容接口调用（流式）
 ├── ui.py           StatusBarComponent 注册、onclick 处理、HTML 弹窗
 └── config.py       常量、默认值、系统 prompt
 ```
@@ -141,11 +152,11 @@ termfix/
 
 **点击后长时间无响应**
 
-- 检查网络是否能访问 `api.anthropic.com`
+- 检查网络是否能访问你配置的 `Base URL`
 - 查看脚本控制台的错误日志
 - 确认 API Key 有效
 
-**`pip install anthropic` 找不到 `~/.iterm2_venv`**
+**`pip install openai` 找不到 `~/.iterm2_venv`**
 
-- 在 iTerm2 中执行 **Scripts → Manage Dependencies**，通过内置界面安装 `anthropic`
+- 在 iTerm2 中执行 **Scripts → Manage Dependencies**，通过内置界面安装 `openai`
 - 或在 Script Console 中查看 Python 可执行文件路径，用对应的 pip 安装
