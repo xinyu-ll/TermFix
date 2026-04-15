@@ -33,6 +33,8 @@ from .llm_client import stream_analyze_error
 
 logger = logging.getLogger(__name__)
 
+_INFO_POPOVER_ID = "__info__"
+
 
 async def register_status_bar(
     connection: iterm2.Connection,
@@ -158,6 +160,10 @@ async def _handle_click(
     """Start analysis if needed and open one live-updating popover."""
     entry = _pick_entry(state, session_id)
     if entry is None:
+        if toggle and state.is_popover_open(_INFO_POPOVER_ID):
+            state.request_popover_close(_INFO_POPOVER_ID)
+            logger.info("TermFix info popover close requested")
+            return
         await _open_info_popover(connection, session_id, state)
         return
 
@@ -305,6 +311,15 @@ def _ensure_status_server(state: "TermFixState") -> None:
 
 def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
     """Return a JSON-safe snapshot of the current analysis state."""
+    if entry_id == _INFO_POPOVER_ID:
+        state.mark_popover_seen(entry_id)
+        return {
+            "ok": True,
+            "status": "info",
+            "done": False,
+            "should_close": state.consume_popover_close_request(entry_id),
+        }
+
     entry = state.get_error(entry_id)
     if entry is None:
         return {
@@ -557,6 +572,8 @@ def _build_info_html(state: "TermFixState") -> str:
     base_url = html.escape(state.base_url or DEFAULT_BASE_URL)
     model = html.escape(state.model or DEFAULT_MODEL)
     api_key_status = "Configured" if state.api_key else "Missing"
+    endpoint = json.dumps(f"{state.status_server_url}/state?entry={_INFO_POPOVER_ID}")
+    close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={_INFO_POPOVER_ID}")
 
     return f"""\
 <!DOCTYPE html>
@@ -591,6 +608,66 @@ def _build_info_html(state: "TermFixState") -> str:
   <div class="item"><span class="label">Base URL:</span> <code>{base_url}</code></div>
   <div class="item"><span class="label">Model:</span> <code>{model}</code></div>
   <div class="item"><span class="label">API Key:</span> <code>{api_key_status}</code></div>
+  <script>
+    const endpoint = {endpoint};
+    const closeEndpoint = {close_endpoint};
+    let timer = null;
+    let closing = false;
+
+    function reportClosed() {{
+      try {{
+        if (navigator.sendBeacon) {{
+          navigator.sendBeacon(closeEndpoint);
+        }} else {{
+          fetch(closeEndpoint, {{ method: "POST", keepalive: true }});
+        }}
+      }} catch (error) {{
+        // Best effort only.
+      }}
+    }}
+
+    function closePopover() {{
+      closing = true;
+      if (timer) {{
+        clearInterval(timer);
+        timer = null;
+      }}
+      reportClosed();
+      window.close();
+    }}
+
+    async function refresh() {{
+      try {{
+        const sep = endpoint.includes("?") ? "&" : "?";
+        const response = await fetch(endpoint + sep + "t=" + Date.now(), {{
+          cache: "no-store"
+        }});
+        const data = await response.json();
+        if (data.should_close) {{
+          closePopover();
+        }}
+      }} catch (error) {{
+        // Ignore transient errors.
+      }}
+    }}
+
+    document.addEventListener("keydown", (event) => {{
+      if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
+          event.key && event.key.toLowerCase() === "j") {{
+        event.preventDefault();
+        closePopover();
+      }}
+    }});
+
+    window.addEventListener("pagehide", () => {{
+      if (!closing) {{
+        reportClosed();
+      }}
+    }});
+
+    refresh();
+    timer = setInterval(refresh, 350);
+  </script>
 </body>
 </html>"""
 
@@ -603,7 +680,9 @@ async def _open_info_popover(
     """Show a helpful popover when there is no pending error entry."""
     if not session_id:
         return
+    _ensure_status_server(state)
     await _open_popover(connection, session_id, state, _build_info_html(state))
+    state.mark_popover_seen(_INFO_POPOVER_ID)
 
 
 async def _open_popover(
