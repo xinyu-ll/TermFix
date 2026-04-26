@@ -24,6 +24,8 @@ from .config import (
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LINES,
     DEFAULT_MODEL,
+    MAX_CONTEXT_LINES,
+    MIN_CONTEXT_LINES,
     POPOVER_HEIGHT,
     POPOVER_WIDTH,
     PROMPT_POPOVER_HEIGHT,
@@ -32,7 +34,7 @@ from .config import (
     STATUS_IDENTIFIER,
     STATUS_NORMAL,
 )
-from .context import collect_context
+from .context import collect_context, normalize_context_lines
 from .llm_client import stream_analyze_error, stream_user_prompt
 from .monitor import PromptEntry
 
@@ -74,7 +76,7 @@ async def register_status_bar(
             key="model",
         ),
         iterm2.StringKnob(
-            name="Context Lines",
+            name=f"Context Lines ({MIN_CONTEXT_LINES}-{MAX_CONTEXT_LINES})",
             placeholder=str(DEFAULT_CONTEXT_LINES),
             default_value=str(DEFAULT_CONTEXT_LINES),
             key="context_lines",
@@ -1758,7 +1760,7 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
 
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
-        state.context_lines = int(ctx_raw)
+        state.context_lines = normalize_context_lines(ctx_raw)
 
 
 def _prompt_history_to_html(

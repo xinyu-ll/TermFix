@@ -15,13 +15,15 @@ from typing import Optional
 
 import iterm2
 
+from .config import DEFAULT_CONTEXT_LINES, MAX_CONTEXT_LINES, MIN_CONTEXT_LINES
+
 logger = logging.getLogger(__name__)
 
 
 async def collect_context(
     connection: iterm2.Connection,
     session: iterm2.Session,
-    context_lines: int = 50,
+    context_lines: int = DEFAULT_CONTEXT_LINES,
     command: Optional[str] = None,
     exit_code: int = 1,
 ) -> dict:
@@ -48,8 +50,18 @@ async def collect_context(
     return ctx
 
 
+def normalize_context_lines(value, default: int = DEFAULT_CONTEXT_LINES) -> int:  # noqa: ANN001 - runtime knob input.
+    """Return a bounded line count that is safe for terminal buffer slicing."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = default
+    return max(MIN_CONTEXT_LINES, min(count, MAX_CONTEXT_LINES))
+
+
 async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
     """Capture the last *max_lines* lines available from the terminal session."""
+    line_count = normalize_context_lines(max_lines)
     lines: list[str] = []
 
     large = 100_000
@@ -59,7 +71,7 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
             line = contents.line(i)
             text = line.string if line.string else ""
             lines.append(text.rstrip())
-        return "\n".join(lines[-max_lines:])
+        return "\n".join(lines[-line_count:])
     except AttributeError:
         logger.debug("async_get_contents unavailable, trying async_get_screen_contents")
     except Exception as exc:
@@ -72,7 +84,7 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
             line = screen.line(i)
             text: str = line.string if line.string else ""
             lines.append(text.rstrip())
-        return "\n".join(lines[-max_lines:])
+        return "\n".join(lines[-line_count:])
     except AttributeError:
         logger.debug("async_get_screen_contents unavailable")
     except Exception as exc:
