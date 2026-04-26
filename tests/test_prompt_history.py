@@ -1,0 +1,237 @@
+import json
+from pathlib import Path
+import sys
+import tempfile
+import types
+import unittest
+
+
+def _install_iterm2_stub() -> None:
+    if "iterm2" in sys.modules:
+        return
+
+    stub = types.ModuleType("iterm2")
+
+    class _Dummy:
+        pass
+
+    class _Modifier:
+        COMMAND = "command"
+        CONTROL = "control"
+        OPTION = "option"
+        SHIFT = "shift"
+
+    class _Keycode:
+        ANSI_J = "j"
+        ANSI_L = "l"
+
+    class _Keystroke:
+        class Action:
+            NA = "na"
+            KEY_DOWN = "key_down"
+
+    stub.App = _Dummy
+    stub.Connection = _Dummy
+    stub.Session = _Dummy
+    stub.Size = _Dummy
+    stub.StatusBarComponent = _Dummy
+    stub.KeystrokePattern = _Dummy
+    stub.Modifier = _Modifier
+    stub.Keycode = _Keycode
+    stub.Keystroke = _Keystroke
+    stub.StatusBarRPC = lambda func: func
+    stub.RPC = lambda func: func
+    stub.async_open_popover = None
+    sys.modules["iterm2"] = stub
+
+
+_install_iterm2_stub()
+
+from termfixlib import monitor, ui  # noqa: E402
+from termfixlib.monitor import PromptEntry, TermFixState  # noqa: E402
+
+
+class PromptHistoryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._old_history_path = monitor.PROMPT_HISTORY_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        monitor.PROMPT_HISTORY_PATH = self._old_history_path
+        self._tmp.cleanup()
+
+    def _set_history_path(self, path: Path) -> None:
+        monitor.PROMPT_HISTORY_PATH = str(path)
+
+    def test_version_1_prompt_history_loads_as_detached(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        history_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "prompts": [
+                        {
+                            "id": "old-entry",
+                            "timestamp": 100.0,
+                            "updated_at": 200.0,
+                            "messages": [{"role": "user", "content": "old prompt"}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._set_history_path(history_path)
+
+        state = TermFixState()
+
+        self.assertEqual(len(state.prompts), 1)
+        entry = state.prompts[0]
+        self.assertEqual(entry.id, "old-entry")
+        self.assertEqual(entry.session_id, "")
+        self.assertEqual(entry.source_session_id, "")
+        self.assertEqual(entry.context, {})
+        self.assertIs(entry.restored, True)
+
+    def test_prompt_history_saves_safe_metadata_and_reloads_detached(self):
+        history_path = self.tmp_path / "state" / "prompt_history.json"
+        self._set_history_path(history_path)
+
+        state = TermFixState()
+        state.prompts = [
+            PromptEntry(
+                session_id="live-session",
+                context={
+                    "command": "cat ~/.ssh/id_rsa",
+                    "cwd": "/tmp/project",
+                    "shell": "zsh",
+                    "terminal_output": "secret line 1\nsecret line 2",
+                    "context_lines": 25,
+                },
+                messages=[
+                    {"role": "user", "content": "what changed?"},
+                    {"role": "assistant", "content": "A status check."},
+                ],
+                status="done",
+            )
+        ]
+
+        state.save_prompt_history()
+        payload = json.loads(history_path.read_text(encoding="utf-8"))
+        record = payload["prompts"][0]
+        self.assertEqual(payload["version"], monitor.PROMPT_HISTORY_VERSION)
+        self.assertEqual(record["source_session_id"], "live-session")
+        self.assertEqual(record["context"]["cwd"], "/tmp/project")
+        self.assertEqual(record["context"]["shell"], "zsh")
+        self.assertEqual(record["context"]["context_lines"], 25)
+        self.assertEqual(record["context"]["terminal_output_line_count"], 2)
+        self.assertNotIn("command", record["context"])
+        self.assertNotIn("terminal_output", record["context"])
+
+        reloaded = TermFixState()
+        restored = reloaded.prompts[0]
+        self.assertEqual(restored.session_id, "")
+        self.assertEqual(restored.source_session_id, "live-session")
+        self.assertEqual(restored.context["cwd"], "/tmp/project")
+        self.assertEqual(restored.context["terminal_output_line_count"], 2)
+        self.assertNotIn("command", restored.context)
+        self.assertNotIn("terminal_output", restored.context)
+        self.assertIs(restored.restored, True)
+
+    def test_legacy_prompt_history_drops_ambient_terminal_context(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        history_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "prompts": [
+                        {
+                            "id": "legacy-context",
+                            "timestamp": 100.0,
+                            "updated_at": 200.0,
+                            "session_id": "old-session",
+                            "context": {
+                                "command": "deploy --token secret",
+                                "cwd": "/tmp/project",
+                                "shell": "zsh",
+                                "terminal_output": "token=secret\nsecond line",
+                                "context_lines": 50,
+                            },
+                            "messages": [{"role": "user", "content": "old prompt"}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._set_history_path(history_path)
+
+        state = TermFixState()
+
+        restored = state.prompts[0]
+        self.assertEqual(restored.source_session_id, "old-session")
+        self.assertEqual(restored.context["cwd"], "/tmp/project")
+        self.assertEqual(restored.context["terminal_output_line_count"], 2)
+        self.assertNotIn("command", restored.context)
+        self.assertNotIn("terminal_output", restored.context)
+
+    def test_attach_prompt_history_does_not_rebind_restored_entries(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        state = TermFixState()
+        restored = PromptEntry(
+            session_id="",
+            context={},
+            messages=[{"role": "user", "content": "restored prompt"}],
+            status="done",
+            restored=True,
+        )
+        empty = PromptEntry(session_id="", context={}, status="input")
+        state.prompts = [restored, empty]
+        session = object()
+
+        ui._attach_prompt_history_to_session(state, "current-session", session)
+
+        self.assertEqual(restored.session_id, "")
+        self.assertIsNone(restored.session)
+        self.assertEqual(empty.session_id, "current-session")
+        self.assertIs(empty.session, session)
+
+    def test_resume_prompt_binds_only_selected_restored_entry(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        state = TermFixState()
+        selected = PromptEntry(
+            session_id="",
+            context={"cwd": "/old"},
+            messages=[{"role": "user", "content": "selected"}],
+            status="done",
+            restored=True,
+        )
+        other = PromptEntry(
+            session_id="",
+            context={"cwd": "/other"},
+            messages=[{"role": "user", "content": "other"}],
+            status="done",
+            restored=True,
+        )
+        session = object()
+        state.prompts = [selected, other]
+        state.prompt_sessions["current-session"] = session
+
+        self.assertIs(
+            ui._resume_prompt_in_session(selected, state, "current-session"),
+            True,
+        )
+
+        self.assertEqual(selected.session_id, "current-session")
+        self.assertIs(selected.session, session)
+        self.assertEqual(selected.context, {})
+        self.assertIs(selected.restored, False)
+        self.assertEqual(other.session_id, "")
+        self.assertEqual(other.context["cwd"], "/other")
+
+
+if __name__ == "__main__":
+    unittest.main()
