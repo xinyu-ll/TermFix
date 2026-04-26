@@ -8,6 +8,7 @@ support package so iTerm2 does not try to execute it as a standalone script.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import html
 import json
 import logging
@@ -15,7 +16,7 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _INFO_POPOVER_ID = "__info__"
 _PROMPT_POPOVER_ID = "__prompt__"
+_STATE_LOOP_CALL_TIMEOUT = 2
 
 
 async def register_status_bar(
@@ -437,13 +439,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/closed":
                 entry_id = parse_qs(parsed.query).get("entry", [""])[0]
-                if entry_id:
-                    if state.get_prompt(entry_id) is not None:
-                        state.mark_popover_closed(_PROMPT_POPOVER_ID)
-                    else:
-                        _mark_error_handled_from_thread(state, entry_id)
-                    state.mark_popover_closed(entry_id)
-                self._send_json({"ok": True})
+                self._send_json(_mark_popover_closed_from_thread(state, entry_id))
                 return
 
             if parsed.path == "/prompt/new":
@@ -478,7 +474,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 return
 
             entry_id = parse_qs(parsed.query).get("entry", [""])[0]
-            self._send_json(_entry_payload(state, entry_id))
+            self._send_json(_entry_payload_from_thread(state, entry_id))
 
         def _send_json(self, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -506,6 +502,72 @@ def _ensure_status_server(state: "TermFixState") -> None:
     state.status_server = server
     state.status_server_url = f"http://127.0.0.1:{server.server_port}"
     logger.info("TermFix popover status server listening on %s", state.status_server_url)
+
+
+def _call_state_loop_from_thread(
+    state: "TermFixState",
+    make_coro: Callable[[], Awaitable[dict]],
+    action: str,
+) -> dict:
+    """Run one state operation on the asyncio loop from an HTTP handler thread."""
+    if state.loop is None:
+        return {"ok": False, "error": "TermFix event loop is unavailable."}
+
+    coro: Optional[Awaitable[dict]] = None
+    future = None
+    try:
+        coro = make_coro()
+        future = asyncio.run_coroutine_threadsafe(coro, state.loop)
+        coro = None
+        return future.result(timeout=_STATE_LOOP_CALL_TIMEOUT)
+    except concurrent.futures.TimeoutError as exc:
+        if future is not None:
+            try:
+                future.cancel()
+            except Exception as cancel_exc:
+                logger.debug("%s cancellation after timeout failed: %s", action, cancel_exc)
+        logger.error("%s timed out: %s", action, exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        logger.error("%s failed: %s", action, exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if coro is not None:
+            close = getattr(coro, "close", None)
+            if close is not None:
+                close()
+
+
+def _mark_popover_closed_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Record a popover close event on the asyncio loop."""
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _mark_popover_closed(entry_id, state),
+        "Popover close",
+    )
+
+
+async def _mark_popover_closed(entry_id: str, state: "TermFixState") -> dict:
+    if entry_id:
+        if state.get_prompt(entry_id) is not None:
+            state.mark_popover_closed(_PROMPT_POPOVER_ID)
+        else:
+            _mark_error_handled_from_thread(state, entry_id)
+        state.mark_popover_closed(entry_id)
+    return {"ok": True}
+
+
+def _entry_payload_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Build a state payload on the asyncio loop."""
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _entry_payload_on_loop(entry_id, state),
+        "State payload",
+    )
+
+
+async def _entry_payload_on_loop(entry_id: str, state: "TermFixState") -> dict:
+    return _entry_payload(state, entry_id)
 
 
 def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
@@ -573,36 +635,22 @@ def _submit_prompt_from_thread(state: "TermFixState", entry_id: str, prompt: str
         return {"ok": False, "error": "Missing prompt entry."}
     if not prompt:
         return {"ok": False, "error": "Prompt is empty."}
-    if state.loop is None:
-        return {"ok": False, "error": "TermFix event loop is unavailable."}
-
-    future = asyncio.run_coroutine_threadsafe(
-        _submit_prompt_entry(entry_id, prompt[:16_000], state),
-        state.loop,
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _submit_prompt_entry(entry_id, prompt[:16_000], state),
+        "Prompt submit",
     )
-    try:
-        return future.result(timeout=2)
-    except Exception as exc:
-        logger.error("Prompt submit failed: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
 
 
 def _create_prompt_from_thread(state: "TermFixState", entry_id: str) -> dict:
     """Create a new prompt conversation based on an existing prompt's session."""
     if not entry_id:
         return {"ok": False, "error": "Missing prompt entry."}
-    if state.loop is None:
-        return {"ok": False, "error": "TermFix event loop is unavailable."}
-
-    future = asyncio.run_coroutine_threadsafe(
-        _create_prompt_entry(entry_id, state),
-        state.loop,
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _create_prompt_entry(entry_id, state),
+        "Prompt creation",
     )
-    try:
-        return future.result(timeout=2)
-    except Exception as exc:
-        logger.error("Prompt creation failed: %s", exc, exc_info=True)
-        return {"ok": False, "error": str(exc)}
 
 
 async def _create_prompt_entry(entry_id: str, state: "TermFixState") -> dict:

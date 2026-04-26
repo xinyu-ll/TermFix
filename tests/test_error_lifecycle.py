@@ -1,5 +1,7 @@
+import asyncio
 import json
 import sys
+import threading
 import types
 import urllib.request
 import unittest
@@ -36,6 +38,27 @@ def _stop_status_server(state: TermFixState) -> None:
 
 
 class ErrorLifecycleTest(unittest.TestCase):
+    def _start_loop(self):
+        loop = asyncio.new_event_loop()
+        ready = threading.Event()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(timeout=1))
+
+        def cleanup() -> None:
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=1)
+            loop.close()
+
+        self.addCleanup(cleanup)
+        return loop
+
     def test_error_count_tracks_unhandled_entries_separately_from_total(self):
         state = TermFixState()
         handled = _entry("session-a", "false", handled=True)
@@ -92,6 +115,7 @@ class ErrorLifecycleTest(unittest.TestCase):
 
     def test_status_server_state_poll_marks_error_handled(self):
         state = TermFixState()
+        state.loop = self._start_loop()
         pending = _entry("session-a", "pytest")
         state.errors.append(pending)
         _ensure_status_server(state)
@@ -107,6 +131,7 @@ class ErrorLifecycleTest(unittest.TestCase):
 
     def test_status_server_closed_preserves_cleanup_and_marks_handled(self):
         state = TermFixState()
+        state.loop = self._start_loop()
         pending = _entry("session-a", "pytest")
         state.errors.append(pending)
         state.mark_popover_seen(pending.id)
