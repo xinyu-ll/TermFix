@@ -105,9 +105,10 @@ async def register_status_bar(
         _sync_knobs(state, knobs)
         if state.analyzing:
             return "⏳ Analyzing..."
-        if state.error_count == 0:
+        unhandled_count = state.unhandled_error_count
+        if unhandled_count == 0:
             return STATUS_NORMAL
-        return STATUS_ERROR_FMT.format(count=state.error_count)
+        return STATUS_ERROR_FMT.format(count=unhandled_count)
 
     @iterm2.RPC
     async def _on_click(session_id):
@@ -393,12 +394,28 @@ Check the TermFix script console for details.
 
 
 def _pick_entry(state: "TermFixState", session_id: Optional[str]):
-    """Prefer the latest error from the clicked session; fall back globally."""
+    """Prefer the latest unhandled error from the clicked session; fall back globally."""
     if session_id:
-        for entry in reversed(state.errors):
-            if entry.session_id == session_id:
-                return entry
-    return state.latest_error()
+        entry = state.latest_unhandled_error(session_id)
+        if entry is not None:
+            return entry
+    return state.latest_unhandled_error()
+
+
+def _notify_ui_update_from_thread(state: "TermFixState") -> None:
+    if state.loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(state.notify_ui_update(), state.loop)
+    except RuntimeError as exc:
+        logger.debug("Could not schedule UI update: %s", exc)
+
+
+def _mark_error_handled_from_thread(state: "TermFixState", entry_id: str) -> bool:
+    handled_error = state.mark_error_handled(entry_id)
+    if handled_error:
+        _notify_ui_update_from_thread(state)
+    return handled_error
 
 
 def _ensure_status_server(state: "TermFixState") -> None:
@@ -423,6 +440,8 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 if entry_id:
                     if state.get_prompt(entry_id) is not None:
                         state.mark_popover_closed(_PROMPT_POPOVER_ID)
+                    else:
+                        _mark_error_handled_from_thread(state, entry_id)
                     state.mark_popover_closed(entry_id)
                 self._send_json({"ok": True})
                 return
@@ -533,6 +552,7 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
             "body_html": "<p>This TermFix result is no longer available.</p>",
         }
 
+    _mark_error_handled_from_thread(state, entry_id)
     state.mark_popover_seen(entry_id)
     markdown = entry.result or "Analyzing..."
     done = entry.status in ("done", "error", "cancelled")
