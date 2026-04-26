@@ -27,6 +27,17 @@ from .context import collect_context
 
 logger = logging.getLogger(__name__)
 
+PROMPT_HISTORY_VERSION = 2
+_PROMPT_CONTEXT_TEXT_LIMIT = 2_000
+_PROMPT_CONTEXT_KEYS = (
+    "cwd",
+    "shell",
+    "os_name",
+    "os_version",
+    "context_lines",
+    "terminal_output_line_count",
+)
+
 
 def _safe_float(value, default: float) -> float:  # noqa: ANN001 - JSON payload input.
     try:
@@ -49,6 +60,42 @@ def _serializable_messages(messages) -> list[dict]:  # noqa: ANN001 - JSON paylo
         content = str(message.get("content") or "")
         if content:
             cleaned.append({"role": role, "content": content})
+    return cleaned
+
+
+def _line_count(value) -> int:  # noqa: ANN001 - JSON payload input.
+    if value is None:
+        return 0
+    text = str(value)
+    if not text:
+        return 0
+    return len(text.splitlines()) or 1
+
+
+def _serializable_context(context) -> dict:  # noqa: ANN001 - JSON payload input.
+    """Return non-sensitive terminal context metadata for prompt history."""
+    if not isinstance(context, dict):
+        return {}
+
+    cleaned: dict = {}
+    for key in _PROMPT_CONTEXT_KEYS:
+        if key not in context:
+            continue
+        value = context.get(key)
+        if value is None:
+            continue
+        if key in ("context_lines", "terminal_output_line_count"):
+            try:
+                cleaned[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+            continue
+        text = str(value)
+        if len(text) > _PROMPT_CONTEXT_TEXT_LIMIT:
+            text = text[-_PROMPT_CONTEXT_TEXT_LIMIT:]
+        cleaned[key] = text
+    if "terminal_output_line_count" not in cleaned and "terminal_output" in context:
+        cleaned["terminal_output_line_count"] = _line_count(context.get("terminal_output"))
     return cleaned
 
 
@@ -84,6 +131,8 @@ class PromptEntry:
     analysis_started: bool = False
     status: str = "input"
     updated_at: float = field(default_factory=time.time)
+    restored: bool = False
+    source_session_id: str = ""
 
 
 class TermFixState:
@@ -107,6 +156,7 @@ class TermFixState:
         self.status_server = None
         self.status_server_url: str = ""
         self.status_server_token: str = ""
+        self.prompt_sessions: dict[str, iterm2.Session] = {}
         self.popover_last_seen: dict[str, float] = {}
         self.popover_close_requests: set[str] = set()
 
@@ -198,6 +248,8 @@ class TermFixState:
                     "id": entry.id,
                     "timestamp": entry.timestamp,
                     "updated_at": entry.updated_at,
+                    "source_session_id": entry.session_id or entry.source_session_id,
+                    "context": _serializable_context(entry.context),
                     "messages": _serializable_messages(entry.messages),
                 }
             )
@@ -207,7 +259,10 @@ class TermFixState:
             tmp_path = f"{PROMPT_HISTORY_PATH}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"version": 1, "prompts": records[-PROMPT_HISTORY_LIMIT:]},
+                    {
+                        "version": PROMPT_HISTORY_VERSION,
+                        "prompts": records[-PROMPT_HISTORY_LIMIT:],
+                    },
                     fh,
                     ensure_ascii=False,
                     indent=2,
@@ -235,14 +290,19 @@ class TermFixState:
             messages = _serializable_messages(item.get("messages", []))
             if not messages:
                 continue
+            context = _serializable_context(item.get("context", {}))
             entry = PromptEntry(
                 session_id="",
-                context={},
+                context=context,
                 messages=messages,
                 id=str(item.get("id") or uuid4().hex),
                 timestamp=_safe_float(item.get("timestamp"), time.time()),
                 updated_at=_safe_float(item.get("updated_at"), time.time()),
                 status="done",
+                restored=True,
+                source_session_id=str(
+                    item.get("session_id") or item.get("source_session_id") or ""
+                ),
             )
             entries.append(entry)
 

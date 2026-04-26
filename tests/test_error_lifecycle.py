@@ -38,6 +38,14 @@ def _stop_status_server(state: TermFixState) -> None:
 
 
 class ErrorLifecycleTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._main_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._main_loop)
+
+    def tearDown(self) -> None:
+        asyncio.set_event_loop(None)
+        self._main_loop.close()
+
     def _start_loop(self):
         loop = asyncio.new_event_loop()
         ready = threading.Event()

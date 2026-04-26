@@ -232,6 +232,7 @@ async def _handle_prompt_hotkey(
         return
 
     try:
+        state.prompt_sessions[session_id] = session
         _attach_prompt_history_to_session(state, session_id, session)
         entry = await _pick_or_create_prompt_entry(state, session_id, session)
         await _open_popover(
@@ -268,9 +269,9 @@ def _attach_prompt_history_to_session(
     session_id: str,
     session,
 ) -> None:
-    """Make persisted prompt history resumable from the current iTerm2 session."""
+    """Attach only live empty placeholders; restored history stays detached."""
     for entry in state.prompts:
-        if entry.status != "streaming":
+        if entry.status == "input" and not entry.messages and not entry.session_id:
             entry.session_id = session_id
             entry.session = session
 
@@ -363,6 +364,8 @@ async def _run_streaming_prompt(entry: PromptEntry, state: "TermFixState") -> No
                     command="",
                     exit_code=0,
                 )
+                entry.context["context_lines"] = state.context_lines
+                state.save_prompt_history()
             except Exception as exc:
                 logger.warning("Could not refresh prompt context: %s", exc)
         async for snapshot in stream_user_prompt(
@@ -496,7 +499,8 @@ def _ensure_status_server(state: "TermFixState") -> None:
                     self.send_error(405)
                     return
                 entry_id = parse_qs(parsed.query).get("entry", [""])[0]
-                self._send_json(_create_prompt_from_thread(state, entry_id))
+                session_id = parse_qs(parsed.query).get("session", [""])[0]
+                self._send_json(_create_prompt_from_thread(state, entry_id, session_id))
                 return
 
             if request_path == "/prompt":
@@ -504,6 +508,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
                     self.send_error(405)
                     return
                 entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                session_id = parse_qs(parsed.query).get("session", [""])[0]
                 try:
                     content_length = int(self.headers.get("Content-Length", "0") or 0)
                 except ValueError:
@@ -515,7 +520,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 except Exception:
                     self._send_json({"ok": False, "error": "Invalid prompt payload."})
                     return
-                self._send_json(_submit_prompt_from_thread(state, entry_id, prompt))
+                self._send_json(_submit_prompt_from_thread(state, entry_id, prompt, session_id))
                 return
 
             if request_path != "/state":
@@ -523,7 +528,8 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 return
 
             entry_id = parse_qs(parsed.query).get("entry", [""])[0]
-            self._send_json(_entry_payload_from_thread(state, entry_id))
+            session_id = parse_qs(parsed.query).get("session", [""])[0]
+            self._send_json(_entry_payload_from_thread(state, entry_id, session_id))
 
         def _authenticated_path(self, parsed) -> Optional[str]:  # noqa: ANN001
             parts = parsed.path.split("/")
@@ -625,20 +631,32 @@ async def _mark_popover_closed(entry_id: str, state: "TermFixState") -> dict:
     return {"ok": True}
 
 
-def _entry_payload_from_thread(state: "TermFixState", entry_id: str) -> dict:
+def _entry_payload_from_thread(
+    state: "TermFixState",
+    entry_id: str,
+    popover_session_id: str = "",
+) -> dict:
     """Build a state payload on the asyncio loop."""
     return _call_state_loop_from_thread(
         state,
-        lambda: _entry_payload_on_loop(entry_id, state),
+        lambda: _entry_payload_on_loop(entry_id, state, popover_session_id),
         "State payload",
     )
 
 
-async def _entry_payload_on_loop(entry_id: str, state: "TermFixState") -> dict:
-    return _entry_payload(state, entry_id)
+async def _entry_payload_on_loop(
+    entry_id: str,
+    state: "TermFixState",
+    popover_session_id: str = "",
+) -> dict:
+    return _entry_payload(state, entry_id, popover_session_id)
 
 
-def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
+def _entry_payload(
+    state: "TermFixState",
+    entry_id: str,
+    popover_session_id: str = "",
+) -> dict:
     """Return a JSON-safe snapshot of the current analysis state."""
     if entry_id == _INFO_POPOVER_ID:
         state.mark_popover_seen(entry_id)
@@ -665,7 +683,17 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
                 or state.consume_popover_close_request(entry_id)
             ),
             "updated_at": prompt_entry.updated_at,
-            "history_html": _prompt_history_to_html(state, prompt_entry.session_id, entry_id),
+            "history_html": _prompt_history_to_html(
+                state,
+                popover_session_id or prompt_entry.session_id,
+                entry_id,
+            ),
+            "context_label": _prompt_context_label(
+                prompt_entry,
+                state,
+                popover_session_id,
+            ),
+            "context_class": _prompt_context_class(prompt_entry, popover_session_id),
             "body_html": _conversation_to_html(
                 prompt_entry.messages,
                 prompt_entry.result or "",
@@ -697,7 +725,12 @@ def _entry_payload(state: "TermFixState", entry_id: str) -> dict:
     }
 
 
-def _submit_prompt_from_thread(state: "TermFixState", entry_id: str, prompt: str) -> dict:
+def _submit_prompt_from_thread(
+    state: "TermFixState",
+    entry_id: str,
+    prompt: str,
+    popover_session_id: str = "",
+) -> dict:
     """Submit a prompt from the HTTP handler thread into the asyncio loop."""
     if not entry_id:
         return {"ok": False, "error": "Missing prompt entry."}
@@ -705,23 +738,31 @@ def _submit_prompt_from_thread(state: "TermFixState", entry_id: str, prompt: str
         return {"ok": False, "error": "Prompt is empty."}
     return _call_state_loop_from_thread(
         state,
-        lambda: _submit_prompt_entry(entry_id, prompt[:16_000], state),
+        lambda: _submit_prompt_entry(entry_id, prompt[:16_000], state, popover_session_id),
         "Prompt submit",
     )
 
 
-def _create_prompt_from_thread(state: "TermFixState", entry_id: str) -> dict:
+def _create_prompt_from_thread(
+    state: "TermFixState",
+    entry_id: str,
+    popover_session_id: str = "",
+) -> dict:
     """Create a new prompt conversation based on an existing prompt's session."""
     if not entry_id:
         return {"ok": False, "error": "Missing prompt entry."}
     return _call_state_loop_from_thread(
         state,
-        lambda: _create_prompt_entry(entry_id, state),
+        lambda: _create_prompt_entry(entry_id, state, popover_session_id),
         "Prompt creation",
     )
 
 
-async def _create_prompt_entry(entry_id: str, state: "TermFixState") -> dict:
+async def _create_prompt_entry(
+    entry_id: str,
+    state: "TermFixState",
+    popover_session_id: str = "",
+) -> dict:
     """Create an empty prompt conversation for the same session as entry_id."""
     current = state.get_prompt(entry_id)
     if current is None:
@@ -729,10 +770,11 @@ async def _create_prompt_entry(entry_id: str, state: "TermFixState") -> dict:
     if not current.messages and current.status == "input":
         return {"ok": True, "entry_id": current.id}
 
+    session_id = current.session_id or popover_session_id
     entry = PromptEntry(
-        session_id=current.session_id,
+        session_id=session_id,
         context={},
-        session=current.session,
+        session=current.session or state.prompt_sessions.get(session_id),
     )
     await state.add_prompt(entry)
     state.mark_popover_seen(_PROMPT_POPOVER_ID)
@@ -740,7 +782,12 @@ async def _create_prompt_entry(entry_id: str, state: "TermFixState") -> dict:
     return {"ok": True, "entry_id": entry.id}
 
 
-async def _submit_prompt_entry(entry_id: str, prompt: str, state: "TermFixState") -> dict:
+async def _submit_prompt_entry(
+    entry_id: str,
+    prompt: str,
+    state: "TermFixState",
+    popover_session_id: str = "",
+) -> dict:
     """Record user text and start the model request for a prompt entry."""
     entry = state.get_prompt(entry_id)
     if entry is None:
@@ -748,6 +795,15 @@ async def _submit_prompt_entry(entry_id: str, prompt: str, state: "TermFixState"
     if entry.status == "streaming":
         return {"ok": False, "error": "Prompt is already running."}
 
+    if _is_detached_prompt(entry) and not _resume_prompt_in_session(
+        entry,
+        state,
+        popover_session_id,
+    ):
+        return {
+            "ok": False,
+            "error": "Current terminal session is unavailable. Reopen Cmd+L and try again.",
+        }
     entry.user_prompt = prompt
     entry.messages.append({"role": "user", "content": prompt})
     entry.result = "Analyzing..."
@@ -1006,13 +1062,13 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     new_endpoint = json.dumps(_status_endpoint(state, "/prompt/new"))
     close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
     active_entry_id = json.dumps(entry.id)
+    popover_session_id = json.dumps(entry.session_id)
     history = _prompt_history_to_html(state, entry.session_id, entry.id)
     body = _conversation_to_html(entry.messages, entry.result or "")
     cwd_label = html.escape(_prompt_cwd_label(entry.context))
     title_suffix = f' <span class="title-dot">&middot;</span> {cwd_label}' if cwd_label else ""
-    context_label = html.escape(
-        f"Context attached · last {state.context_lines} lines of output"
-    )
+    context_label = html.escape(_prompt_context_label(entry, state, entry.session_id))
+    context_class = html.escape(_prompt_context_class(entry, entry.session_id))
 
     return f"""\
 <!DOCTYPE html>
@@ -1211,6 +1267,14 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       font-size: 11px;
       font-weight: 700;
     }}
+    .history-badge {{
+      flex: 0 0 auto;
+      color: #8a6d16;
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
     .history-preview {{
       display: block;
       margin-top: 3px;
@@ -1381,6 +1445,12 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       border-radius: 50%;
       background: var(--green);
     }}
+    .context-line.restored .context-dot {{
+      background: #b58300;
+    }}
+    .context-line.empty .context-dot {{
+      background: var(--muted);
+    }}
     .input-row {{
       display: flex;
       gap: 8px;
@@ -1501,9 +1571,9 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       <section class="chat-pane">
         <div id="content" class="conversation">{body}</div>
         <form id="prompt-form">
-          <div class="context-line">
+          <div id="context-line" class="context-line {context_class}">
             <span class="context-dot" aria-hidden="true"></span>
-            <span>{context_label}</span>
+            <span id="context-label">{context_label}</span>
           </div>
           <div class="input-row">
             <textarea id="prompt-input" placeholder="Ask about this terminal session..." autofocus></textarea>
@@ -1520,6 +1590,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     const newEndpoint = {new_endpoint};
     const closeEndpoint = {close_endpoint};
     let activeEntryId = {active_entry_id};
+    const popoverSessionId = {popover_session_id};
     const formEl = document.getElementById("prompt-form");
     const promptEl = document.getElementById("prompt-input");
     const sendButton = document.getElementById("send-button");
@@ -1527,6 +1598,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     const historyListEl = document.getElementById("history-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
+    const contextLineEl = document.getElementById("context-line");
+    const contextLabelEl = document.getElementById("context-label");
     let lastHtml = contentEl.innerHTML;
     let timer = null;
     let closing = false;
@@ -1536,7 +1609,11 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     sendButton.disabled = busy;
 
     function withEntry(url) {{
-      return url + "?entry=" + encodeURIComponent(activeEntryId);
+      let query = "?entry=" + encodeURIComponent(activeEntryId);
+      if (popoverSessionId) {{
+        query += "&session=" + encodeURIComponent(popoverSessionId);
+      }}
+      return url + query;
     }}
 
     function reportClosed() {{
@@ -1599,6 +1676,12 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         }}
         if (typeof data.history_html === "string") {{
           historyListEl.innerHTML = data.history_html;
+        }}
+        if (typeof data.context_label === "string") {{
+          contextLabelEl.textContent = data.context_label;
+        }}
+        if (typeof data.context_class === "string") {{
+          contextLineEl.className = "context-line " + data.context_class;
         }}
         setStatus(data.status);
         busy = data.status === "streaming";
@@ -1909,9 +1992,12 @@ def _prompt_history_to_html(
     session_id: str,
     active_entry_id: str,
 ) -> str:
-    """Render prompt history buttons for the current terminal session."""
+    """Render current-session history plus detached restored conversations."""
     entries = [
-        entry for entry in state.prompts if entry.session_id == session_id and entry.messages
+        entry
+        for entry in state.prompts
+        if entry.messages
+        and (entry.session_id == session_id or _is_detached_prompt(entry))
     ]
     if not entries:
         return ""
@@ -1926,21 +2012,93 @@ def _prompt_history_to_html(
 
         active = " active" if entry.id == active_entry_id else ""
         status = " running" if entry.status == "streaming" else ""
+        restored = " restored" if _is_detached_prompt(entry) else ""
         title = html.escape(_prompt_history_title(entry, limit=30))
-        full_title = html.escape(_prompt_history_title(entry, limit=None))
+        full_title = _prompt_history_title(entry, limit=None)
+        if _is_detached_prompt(entry):
+            full_title = f"{full_title} - restored history"
+        full_title = html.escape(full_title)
         preview = html.escape(_prompt_history_preview(entry))
         timestamp = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
+        badge = '<span class="history-badge">Restored</span>' if restored else ""
         blocks.append(
-            f'<button class="history-item{active}{status}" '
+            f'<button class="history-item{active}{status}{restored}" '
             f'data-entry-id="{html.escape(entry.id)}" title="{full_title}" type="button">'
             '<span class="history-main">'
             f'<span class="history-title">{title}</span>'
             f'<span class="history-time">{timestamp}</span>'
+            f"{badge}"
             "</span>"
             f'<span class="history-preview">{preview}</span>'
             "</button>"
         )
     return "\n".join(blocks)
+
+
+def _is_detached_prompt(entry: PromptEntry) -> bool:
+    return bool(entry.messages and not entry.session_id)
+
+
+def _resume_prompt_in_session(
+    entry: PromptEntry,
+    state: "TermFixState",
+    popover_session_id: str,
+) -> bool:
+    """Bind one selected restored conversation to the active session on submit."""
+    if entry.session_id:
+        return True
+    if not popover_session_id:
+        return False
+
+    session = state.prompt_sessions.get(popover_session_id)
+    if session is None:
+        return False
+
+    entry.session_id = popover_session_id
+    entry.session = session
+    entry.restored = False
+    entry.context = {}
+    return True
+
+
+def _prompt_context_label(
+    entry: PromptEntry,
+    state: "TermFixState",
+    popover_session_id: str = "",
+) -> str:
+    """Return the context status shown below the conversation."""
+    if _is_detached_prompt(entry):
+        cwd = _prompt_cwd_label(entry.context)
+        origin = f" from {cwd}" if cwd else ""
+        return f"Restored history{origin} - next reply uses current session context"
+
+    if not entry.session_id:
+        return "Current session context will attach when you send"
+
+    if popover_session_id and entry.session_id != popover_session_id:
+        cwd = _prompt_cwd_label(entry.context)
+        origin = f" from {cwd}" if cwd else ""
+        return f"Different session context{origin}"
+
+    context_lines = _prompt_context_lines(entry.context, state)
+    return f"Current session context - last {context_lines} lines of output"
+
+
+def _prompt_context_class(entry: PromptEntry, popover_session_id: str = "") -> str:
+    if _is_detached_prompt(entry):
+        return "restored"
+    if not entry.session_id:
+        return "empty"
+    if popover_session_id and entry.session_id != popover_session_id:
+        return "restored"
+    return "current"
+
+
+def _prompt_context_lines(context: dict, state: "TermFixState") -> int:
+    try:
+        return int((context or {}).get("context_lines") or state.context_lines)
+    except (TypeError, ValueError):
+        return state.context_lines
 
 
 def _prompt_cwd_label(context: dict) -> str:
