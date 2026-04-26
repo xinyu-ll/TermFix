@@ -37,6 +37,7 @@ async def collect_context(
     }
 
     ctx["terminal_output"] = await _get_terminal_output(session, context_lines)
+    ctx["terminal_output_line_count"] = _count_lines(ctx["terminal_output"])
     ctx["cwd"] = await _get_variable(session, "path") or ""
 
     shell_var = await _get_variable(session, "shell")
@@ -81,6 +82,11 @@ async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
     return ""
 
 
+def _count_lines(text: str) -> int:
+    """Return the number of captured terminal lines in *text*."""
+    return text.count("\n") + 1 if text else 0
+
+
 async def _get_variable(session: iterm2.Session, name: str) -> Optional[str]:
     """Safely read a session variable; returns None on any error."""
     try:
@@ -112,6 +118,12 @@ def build_user_message(ctx: dict) -> str:
 
 def build_manual_system_prompt(ctx: dict) -> str:
     """Build the system message for a user-authored terminal question."""
+    terminal_output = ctx.get("terminal_output") or ""
+    terminal_line_count = ctx.get("terminal_output_line_count")
+    if not isinstance(terminal_line_count, int):
+        terminal_line_count = _count_lines(terminal_output)
+    line_label = "line" if terminal_line_count == 1 else "lines"
+
     lines = [
         "You are TermFix, an assistant integrated into iTerm2.",
         "The user is working in an iTerm2 command-line environment.",
@@ -122,9 +134,12 @@ def build_manual_system_prompt(ctx: dict) -> str:
         f"Shell: {ctx.get('shell') or '(unknown)'}",
         f"OS: {ctx.get('os_name') or '(unknown)'} {ctx.get('os_version') or ''}".rstrip(),
         "",
-        "Current iTerm2 session command-line code/output (last 50 lines):",
+        (
+            "Current iTerm2 session command-line code/output "
+            f"(last {terminal_line_count} {line_label}):"
+        ),
         "---",
-        ctx.get("terminal_output") or "(no terminal content captured)",
+        terminal_output or "(no terminal content captured)",
         "---",
         "",
         "Answer the user's prompt directly and concisely. When suggesting terminal commands,",
