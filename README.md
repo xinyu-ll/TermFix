@@ -17,7 +17,9 @@
   </p>
 </div>
 
-![TermFix hero](assets/termfix-hero.png)
+<p align="center">
+  <img src="assets/termfix-hero.png" alt="TermFix hero" width="760">
+</p>
 
 ## Why TermFix
 
