@@ -8,6 +8,7 @@ rather than raising, so a single bad API call never aborts the pipeline.
 
 from __future__ import annotations
 
+from collections import deque
 import logging
 import os
 import platform
@@ -21,6 +22,8 @@ except ImportError:  # Allows pure helpers to be imported outside iTerm2.
 from .config import DEFAULT_CONTEXT_LINES, MAX_CONTEXT_LINES, MIN_CONTEXT_LINES
 
 logger = logging.getLogger(__name__)
+
+MAX_TERMINAL_CONTEXT_LINES = MAX_CONTEXT_LINES
 
 
 async def collect_context(
@@ -41,7 +44,7 @@ async def collect_context(
         "os_version": platform.release(),
     }
 
-    ctx["terminal_output"] = await _get_terminal_output(session, context_lines)
+    ctx["terminal_output"] = await _get_terminal_output(connection, session, context_lines)
     ctx["cwd"] = await _get_variable(session, "path") or ""
 
     shell_var = await _get_variable(session, "shell")
@@ -62,38 +65,113 @@ def normalize_context_lines(value, default: int = DEFAULT_CONTEXT_LINES) -> int:
     return max(MIN_CONTEXT_LINES, min(count, MAX_CONTEXT_LINES))
 
 
-async def _get_terminal_output(session: iterm2.Session, max_lines: int) -> str:
+async def _get_terminal_output(
+    connection_or_session,
+    session_or_max_lines,
+    max_lines=None,
+) -> str:
     """Capture the last *max_lines* lines available from the terminal session."""
-    line_count = normalize_context_lines(max_lines)
-    lines: list[str] = []
+    if max_lines is None:
+        connection = None
+        session = connection_or_session
+        max_lines = session_or_max_lines
+    else:
+        connection = connection_or_session
+        session = session_or_max_lines
 
-    large = 100_000
+    line_count = _bounded_line_count(max_lines)
+    if line_count == 0:
+        return ""
+
     try:
-        contents = await session.async_get_contents(0, large)
-        for i in range(contents.number_of_lines):
-            line = contents.line(i)
-            text = line.string if line.string else ""
-            lines.append(text.rstrip())
-        return "\n".join(lines[-line_count:])
+        contents = await _get_recent_contents(connection, session, line_count)
+        return _join_tail_lines(contents, line_count)
     except AttributeError:
-        logger.debug("async_get_contents unavailable, trying async_get_screen_contents")
+        logger.debug("bounded terminal contents unavailable, trying async_get_screen_contents")
     except Exception as exc:
         logger.warning("Could not get terminal contents: %s", exc)
 
-    lines = []
     try:
         screen: iterm2.ScreenContents = await session.async_get_screen_contents()
-        for i in range(screen.number_of_lines):
-            line = screen.line(i)
-            text: str = line.string if line.string else ""
-            lines.append(text.rstrip())
-        return "\n".join(lines[-line_count:])
+        return _join_tail_lines(screen, line_count)
     except AttributeError:
         logger.debug("async_get_screen_contents unavailable")
     except Exception as exc:
         logger.warning("Could not get screen contents via async_get_screen_contents: %s", exc)
 
     return ""
+
+
+def _bounded_line_count(max_lines: int) -> int:
+    """Return a safe, bounded terminal context size."""
+    try:
+        requested = int(max_lines)
+    except (TypeError, ValueError):
+        return 0
+
+    if requested <= 0:
+        return 0
+    return min(requested, MAX_TERMINAL_CONTEXT_LINES)
+
+
+async def _get_recent_contents(
+    connection: Optional[iterm2.Connection],
+    session: iterm2.Session,
+    line_count: int,
+):
+    """Fetch a bounded tail window from scrollback when line info is available.
+
+    iTerm2 recommends pairing line info and content reads in a Transaction so
+    the range calculation and read observe the same terminal state.
+    """
+    transaction = getattr(iterm2, "Transaction", None)
+
+    if connection is not None and transaction is not None:
+        async with transaction(connection):
+            return await _read_recent_contents(session, line_count)
+
+    return await _read_recent_contents(session, line_count)
+
+
+async def _read_recent_contents(session: iterm2.Session, line_count: int):
+    line_info = await session.async_get_line_info()
+    first_line = _first_recent_line(line_info, line_count)
+    return await session.async_get_contents(first_line, line_count)
+
+
+def _first_recent_line(line_info, line_count: int) -> int:  # noqa: ANN001 - iTerm2 object.
+    overflow = _non_negative_int(getattr(line_info, "overflow", 0))
+    scrollback_height = _non_negative_int(getattr(line_info, "scrollback_buffer_height", 0))
+    mutable_height = _non_negative_int(getattr(line_info, "mutable_area_height", 0))
+    available_lines = scrollback_height + mutable_height
+
+    return overflow + max(available_lines - line_count, 0)
+
+
+def _non_negative_int(value) -> int:  # noqa: ANN001 - iTerm2 numeric field.
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _join_tail_lines(contents, line_count: int) -> str:  # noqa: ANN001 - iTerm2 content object.
+    lines: deque[str] = deque(maxlen=line_count)
+    for line in _iter_line_contents(contents):
+        text = getattr(line, "string", "") or ""
+        lines.append(text.rstrip())
+    return "\n".join(lines)
+
+
+def _iter_line_contents(contents):  # noqa: ANN001 - iTerm2 content object.
+    """Yield line objects from both current and documented iTerm2 content shapes."""
+    if hasattr(contents, "number_of_lines") and hasattr(contents, "line"):
+        for i in range(_non_negative_int(contents.number_of_lines)):
+            yield contents.line(i)
+        return
+
+    for line in contents:
+        yield line
 
 
 async def _get_variable(session: iterm2.Session, name: str) -> Optional[str]:

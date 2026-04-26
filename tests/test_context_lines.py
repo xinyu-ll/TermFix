@@ -26,9 +26,19 @@ class _Contents:
         return self._lines[index]
 
 
+class _LineInfo:
+    def __init__(self, line_count: int) -> None:
+        self.overflow = 0
+        self.scrollback_buffer_height = line_count
+        self.mutable_area_height = 0
+
+
 class _Session:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
+
+    async def async_get_line_info(self) -> _LineInfo:
+        return _LineInfo(len(self._lines))
 
     async def async_get_contents(self, _start: int, _count: int) -> _Contents:
         return _Contents(self._lines)
@@ -61,17 +71,17 @@ class ContextLinesTests(unittest.TestCase):
         _sync_knobs(state, {"context_lines": "invalid"})
         self.assertEqual(state.context_lines, MAX_CONTEXT_LINES)
 
-    def test_terminal_output_zero_context_lines_returns_last_line_only(self) -> None:
+    def test_terminal_output_zero_context_lines_returns_no_output(self) -> None:
         output = asyncio.run(_get_terminal_output(_Session(["one", "two", "three"]), 0))
 
-        self.assertEqual(output, "three")
+        self.assertEqual(output, "")
 
-    def test_terminal_output_invalid_context_lines_uses_default_not_full_buffer(self) -> None:
+    def test_terminal_output_invalid_context_lines_returns_no_output(self) -> None:
         lines = [f"line {i}" for i in range(DEFAULT_CONTEXT_LINES + 10)]
 
         output = asyncio.run(_get_terminal_output(_Session(lines), "invalid"))
 
-        self.assertEqual(output.splitlines(), lines[-DEFAULT_CONTEXT_LINES:])
+        self.assertEqual(output, "")
 
     def test_terminal_output_clamps_large_context_lines(self) -> None:
         lines = [f"line {i}" for i in range(MAX_CONTEXT_LINES + 100)]
