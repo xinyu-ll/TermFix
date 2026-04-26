@@ -61,6 +61,8 @@ class ErrorEntry:
     result: Optional[str] = None
     analyzed: bool = False
     analysis_started: bool = False
+    handled: bool = False
+    handled_at: Optional[float] = None
     status: str = "pending"
     updated_at: float = field(default_factory=time.time)
 
@@ -122,16 +124,43 @@ class TermFixState:
 
     @property
     def error_count(self) -> int:
+        return self.unhandled_error_count
+
+    @property
+    def unhandled_error_count(self) -> int:
+        return sum(1 for entry in self.errors if not entry.handled)
+
+    @property
+    def total_error_count(self) -> int:
         return len(self.errors)
 
     def latest_error(self) -> Optional[ErrorEntry]:
         return self.errors[-1] if self.errors else None
+
+    def latest_unhandled_error(self, session_id: Optional[str] = None) -> Optional[ErrorEntry]:
+        for entry in reversed(self.errors):
+            if entry.handled:
+                continue
+            if session_id is not None and entry.session_id != session_id:
+                continue
+            return entry
+        return None
 
     def get_error(self, entry_id: str) -> Optional[ErrorEntry]:
         for entry in self.errors:
             if entry.id == entry_id:
                 return entry
         return None
+
+    def mark_error_handled(self, entry_id: str) -> bool:
+        entry = self.get_error(entry_id)
+        if entry is None or entry.handled:
+            return False
+        handled_at = time.time()
+        entry.handled = True
+        entry.handled_at = handled_at
+        entry.updated_at = handled_at
+        return True
 
     def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
         for entry in reversed(self.prompts):
@@ -252,7 +281,7 @@ class TermFixState:
         try:
             await self.component.async_set_unread_count(
                 None,
-                self.error_count,
+                self.unhandled_error_count,
             )
         except Exception as exc:
             logger.debug("async_set_unread_count failed: %s", exc)
