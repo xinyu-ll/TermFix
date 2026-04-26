@@ -346,7 +346,7 @@ async def _run_streaming_prompt(entry: PromptEntry, state: "TermFixState") -> No
                 entry.context = await collect_context(
                     state.connection,
                     entry.session,
-                    context_lines=DEFAULT_CONTEXT_LINES,
+                    context_lines=state.context_lines,
                     command="",
                     exit_code=0,
                 )
