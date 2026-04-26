@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 from uuid import uuid4
 
-import iterm2
+try:
+    import iterm2
+except ImportError:  # Allows pure state/history helpers to be imported outside iTerm2.
+    iterm2 = None  # type: ignore[assignment]
 
 from .config import (
     DEFAULT_BASE_URL,
