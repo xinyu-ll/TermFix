@@ -106,6 +106,7 @@ class TermFixState:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.status_server = None
         self.status_server_url: str = ""
+        self.status_server_token: str = ""
         self.popover_last_seen: dict[str, float] = {}
         self.popover_close_requests: set[str] = set()
 

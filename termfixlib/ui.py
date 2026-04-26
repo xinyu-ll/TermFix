@@ -13,11 +13,12 @@ import html
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Awaitable, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 try:
     import iterm2
@@ -47,6 +48,15 @@ logger = logging.getLogger(__name__)
 _INFO_POPOVER_ID = "__info__"
 _PROMPT_POPOVER_ID = "__prompt__"
 _STATE_LOOP_CALL_TIMEOUT = 2
+_POPOVER_CORS_ORIGIN = "null"
+_POPOVER_ROUTES = frozenset({"/closed", "/prompt/new", "/prompt", "/state"})
+
+
+def _popover_cors_origin(origin: str) -> Optional[str]:
+    """Return the CORS origin accepted for iTerm's opaque popover document."""
+    if origin == _POPOVER_CORS_ORIGIN:
+        return _POPOVER_CORS_ORIGIN
+    return None
 
 
 async def register_status_bar(
@@ -420,13 +430,43 @@ def _mark_error_handled_from_thread(state: "TermFixState", entry_id: str) -> boo
     return handled_error
 
 
+def _status_endpoint(
+    state: "TermFixState",
+    path: str,
+    query: Optional[dict[str, str]] = None,
+) -> str:
+    """Return a token-bearing local popover endpoint URL."""
+    _ensure_status_server(state)
+    token = state.status_server_token
+    if not token:
+        raise RuntimeError("TermFix status server token is unavailable")
+    endpoint = f"{state.status_server_url}/{token}{path}"
+    if query:
+        endpoint = f"{endpoint}?{urlencode(query)}"
+    return endpoint
+
+
 def _ensure_status_server(state: "TermFixState") -> None:
     """Start a local JSON endpoint for popovers to poll live analysis state."""
     if state.status_server_url:
         return
 
+    token = secrets.token_urlsafe(32)
+
     class Handler(BaseHTTPRequestHandler):
         def do_OPTIONS(self):  # noqa: N802 - BaseHTTPRequestHandler API.
+            parsed = urlparse(self.path)
+            request_path = self._authenticated_path(parsed)
+            if request_path is None:
+                self._send_json(
+                    {"ok": False, "error": "Unauthorized."},
+                    status=403,
+                    allow_cors=False,
+                )
+                return
+            if request_path not in _POPOVER_ROUTES:
+                self.send_error(404)
+                return
             self._send_json({})
 
         def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API.
@@ -437,12 +477,21 @@ def _ensure_status_server(state: "TermFixState") -> None:
 
         def _handle_request(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path == "/closed":
+            request_path = self._authenticated_path(parsed)
+            if request_path is None:
+                self._send_json(
+                    {"ok": False, "error": "Unauthorized."},
+                    status=403,
+                    allow_cors=False,
+                )
+                return
+
+            if request_path == "/closed":
                 entry_id = parse_qs(parsed.query).get("entry", [""])[0]
                 self._send_json(_mark_popover_closed_from_thread(state, entry_id))
                 return
 
-            if parsed.path == "/prompt/new":
+            if request_path == "/prompt/new":
                 if self.command != "POST":
                     self.send_error(405)
                     return
@@ -450,7 +499,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 self._send_json(_create_prompt_from_thread(state, entry_id))
                 return
 
-            if parsed.path == "/prompt":
+            if request_path == "/prompt":
                 if self.command != "POST":
                     self.send_error(405)
                     return
@@ -469,27 +518,45 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 self._send_json(_submit_prompt_from_thread(state, entry_id, prompt))
                 return
 
-            if parsed.path != "/state":
+            if request_path != "/state":
                 self.send_error(404)
                 return
 
             entry_id = parse_qs(parsed.query).get("entry", [""])[0]
             self._send_json(_entry_payload_from_thread(state, entry_id))
 
-        def _send_json(self, payload: dict) -> None:
+        def _authenticated_path(self, parsed) -> Optional[str]:  # noqa: ANN001
+            parts = parsed.path.split("/")
+            if len(parts) < 3:
+                return None
+            candidate = parts[1]
+            if not secrets.compare_digest(candidate, token):
+                return None
+            return "/" + "/".join(parts[2:])
+
+        def _send_json(
+            self,
+            payload: dict,
+            status: int = 200,
+            allow_cors: bool = True,
+        ) -> None:
             body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            cors_origin = _popover_cors_origin(self.headers.get("Origin", ""))
+            if allow_cors and cors_origin:
+                self.send_header("Access-Control-Allow-Origin", cors_origin)
+                self.send_header("Vary", "Origin")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def log_message(self, fmt, *args):  # noqa: ANN001
-            logger.debug("Popover status server: " + fmt, *args)
+            # Default request-line logs include the bearer token embedded in the URL.
+            return
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(
@@ -501,6 +568,7 @@ def _ensure_status_server(state: "TermFixState") -> None:
 
     state.status_server = server
     state.status_server_url = f"http://127.0.0.1:{server.server_port}"
+    state.status_server_token = token
     logger.info("TermFix popover status server listening on %s", state.status_server_url)
 
 
@@ -745,8 +813,8 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     failed_cmd = html.escape(entry.command or "(unknown command)")
     exit_code = entry.exit_code
     body = _markdown_to_html(entry.result or "Analyzing...")
-    endpoint = json.dumps(f"{state.status_server_url}/state?entry={entry.id}")
-    close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={entry.id}")
+    endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": entry.id}))
+    close_endpoint = json.dumps(_status_endpoint(state, "/closed", {"entry": entry.id}))
 
     return f"""\
 <!DOCTYPE html>
@@ -933,10 +1001,10 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     """Build the manual prompt popover."""
     _ensure_status_server(state)
-    state_endpoint = json.dumps(f"{state.status_server_url}/state")
-    submit_endpoint = json.dumps(f"{state.status_server_url}/prompt")
-    new_endpoint = json.dumps(f"{state.status_server_url}/prompt/new")
-    close_endpoint = json.dumps(f"{state.status_server_url}/closed")
+    state_endpoint = json.dumps(_status_endpoint(state, "/state"))
+    submit_endpoint = json.dumps(_status_endpoint(state, "/prompt"))
+    new_endpoint = json.dumps(_status_endpoint(state, "/prompt/new"))
+    close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
     active_entry_id = json.dumps(entry.id)
     history = _prompt_history_to_html(state, entry.session_id, entry.id)
     body = _conversation_to_html(entry.messages, entry.result or "")
@@ -1675,8 +1743,10 @@ def _build_info_html(state: "TermFixState") -> str:
     base_url = html.escape(state.base_url or DEFAULT_BASE_URL)
     model = html.escape(state.model or DEFAULT_MODEL)
     api_key_status = "Configured" if state.api_key else "Missing"
-    endpoint = json.dumps(f"{state.status_server_url}/state?entry={_INFO_POPOVER_ID}")
-    close_endpoint = json.dumps(f"{state.status_server_url}/closed?entry={_INFO_POPOVER_ID}")
+    endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": _INFO_POPOVER_ID}))
+    close_endpoint = json.dumps(
+        _status_endpoint(state, "/closed", {"entry": _INFO_POPOVER_ID})
+    )
 
     return f"""\
 <!DOCTYPE html>

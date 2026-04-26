@@ -9,7 +9,7 @@ import unittest
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
 from termfixlib.monitor import ErrorEntry, TermFixState
-from termfixlib.ui import _ensure_status_server, _entry_payload, _pick_entry
+from termfixlib.ui import _ensure_status_server, _entry_payload, _pick_entry, _status_endpoint
 
 
 def _entry(session_id: str, command: str, handled: bool = False) -> ErrorEntry:
@@ -120,7 +120,7 @@ class ErrorLifecycleTest(unittest.TestCase):
         state.errors.append(pending)
         _ensure_status_server(state)
         try:
-            payload = _read_json(f"{state.status_server_url}/state?entry={pending.id}")
+            payload = _read_json(_status_endpoint(state, "/state", {"entry": pending.id}))
         finally:
             _stop_status_server(state)
 
@@ -138,7 +138,10 @@ class ErrorLifecycleTest(unittest.TestCase):
         state.request_popover_close(pending.id)
         _ensure_status_server(state)
         try:
-            payload = _read_json(f"{state.status_server_url}/closed?entry={pending.id}", "POST")
+            payload = _read_json(
+                _status_endpoint(state, "/closed", {"entry": pending.id}),
+                "POST",
+            )
         finally:
             _stop_status_server(state)
 
