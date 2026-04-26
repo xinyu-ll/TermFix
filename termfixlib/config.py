@@ -23,6 +23,8 @@ PROMPT_HISTORY_LIMIT = 100
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_CONTEXT_LINES = 50
+MIN_CONTEXT_LINES = 1
+MAX_CONTEXT_LINES = 500
 
 # System prompt for a terminal error analysis assistant. Keep this stable so
 # responses remain consistent across providers and model changes.
