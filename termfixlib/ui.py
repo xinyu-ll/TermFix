@@ -18,7 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
-import iterm2
+try:
+    import iterm2
+except ImportError:  # Allows pure rendering helpers to be imported outside iTerm2.
+    iterm2 = None  # type: ignore[assignment]
 
 from .config import (
     DEFAULT_BASE_URL,
