@@ -923,8 +923,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       gap: 12px;
     }}
     .history-pane {{
-      width: 116px;
-      flex: 0 0 116px;
+      width: 140px;
+      flex: 0 0 140px;
       min-height: 0;
       display: flex;
       flex-direction: column;
@@ -946,17 +946,17 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }}
     .history-item {{
       width: 100%;
-      min-height: 54px;
+      min-height: 72px;
       height: auto;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 2px;
+      gap: 4px;
       border: 1px solid transparent;
       border-radius: 6px;
       background: transparent;
       color: #3c3c43;
-      padding: 6px 7px;
+      padding: 7px 8px;
       text-align: left;
       font-weight: 500;
     }}
@@ -974,9 +974,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       overflow: hidden;
       display: -webkit-box;
       -webkit-box-orient: vertical;
-      -webkit-line-clamp: 2;
-      line-height: 1.25;
-      max-height: 2.5em;
+      -webkit-line-clamp: 3;
+      font-size: 12px;
+      line-height: 1.22;
+      max-height: 3.66em;
       white-space: normal;
       overflow-wrap: anywhere;
       word-break: break-word;
@@ -985,6 +986,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       font-size: 10px;
       color: #8e8e93;
       font-weight: 500;
+      flex-shrink: 0;
     }}
     .chat-pane {{
       flex: 1;
@@ -1522,10 +1524,11 @@ def _prompt_history_to_html(
         active = " active" if entry.id == active_entry_id else ""
         status = " running" if entry.status == "streaming" else ""
         title = html.escape(_prompt_history_title(entry))
+        full_title = html.escape(_prompt_history_title(entry, limit=None))
         subtitle = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
         blocks.append(
             f'<button class="history-item{active}{status}" '
-            f'data-entry-id="{html.escape(entry.id)}" type="button">'
+            f'data-entry-id="{html.escape(entry.id)}" title="{full_title}" type="button">'
             f'<span class="history-title">{title}</span>'
             f'<span class="history-time">{subtitle}</span>'
             "</button>"
@@ -1533,7 +1536,7 @@ def _prompt_history_to_html(
     return "\n".join(blocks)
 
 
-def _prompt_history_title(entry: PromptEntry) -> str:
+def _prompt_history_title(entry: PromptEntry, limit: Optional[int] = 48) -> str:
     """Return a short title for a prompt conversation."""
     for message in entry.messages:
         if not isinstance(message, dict) or message.get("role") != "user":
@@ -1541,7 +1544,9 @@ def _prompt_history_title(entry: PromptEntry) -> str:
         content = str(message.get("content") or "").strip().splitlines()
         if content and content[0].strip():
             title = content[0].strip()
-            return title[:28] + ("..." if len(title) > 28 else "")
+            if limit is not None and len(title) > limit:
+                return title[:limit] + "..."
+            return title
     return "New chat"
 
 
