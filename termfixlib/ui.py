@@ -11,6 +11,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -866,6 +867,11 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     active_entry_id = json.dumps(entry.id)
     history = _prompt_history_to_html(state, entry.session_id, entry.id)
     body = _conversation_to_html(entry.messages, entry.result or "")
+    cwd_label = html.escape(_prompt_cwd_label(entry.context))
+    title_suffix = f' <span class="title-dot">&middot;</span> {cwd_label}' if cwd_label else ""
+    context_label = html.escape(
+        f"Context attached · last {state.context_lines} lines of output"
+    )
 
     return f"""\
 <!DOCTYPE html>
@@ -874,119 +880,205 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
   <meta charset="UTF-8">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    html {{
+    :root {{
+      --paper: #f6f4ed;
+      --panel: #f0eee7;
+      --line: #d8d5cb;
+      --line-strong: #c7c3b8;
+      --ink: #161616;
+      --soft-ink: #3b3a36;
+      --muted: #77756d;
+      --field: #f7f5ee;
+      --green: #24a579;
+      --shadow: 0 12px 35px rgba(40, 39, 34, 0.12);
+      --mono: "SF Mono", "Menlo", "Monaco", "Cascadia Mono", monospace;
+      --sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+    }}
+    html, body {{
       height: 100%;
     }}
     body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      min-height: 100%;
+      padding: 14px;
+      overflow: hidden;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(23, 22, 18, 0.018) 50%, transparent 50%) 0 0 / 100% 4px,
+        var(--paper);
+      font-family: var(--sans);
       font-size: 13px;
-      color: #1c1c1e;
-      background: #ffffff;
+      line-height: 1.45;
+    }}
+    .window {{
       height: 100%;
       display: flex;
       flex-direction: column;
-      padding: 14px 16px 12px;
-      line-height: 1.45;
       overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbfbf8;
+      box-shadow: var(--shadow);
     }}
-    header {{
+    .window-bar {{
+      position: relative;
+      height: 52px;
+      flex: 0 0 52px;
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
-      padding-bottom: 10px;
-      border-bottom: 1px solid #e5e5ea;
+      justify-content: center;
+      border-bottom: 1px solid var(--line);
+      background: #f2f0e8;
     }}
-    header h1 {{ font-size: 14px; font-weight: 600; color: #0d0d0d; }}
-    .status {{
-      margin-left: auto;
-      font-size: 11px;
-      color: #8e8e93;
-    }}
-    .status.streaming::after {{
-      content: "";
-      display: inline-block;
-      width: 1em;
-      animation: dots 1.1s steps(4, end) infinite;
-    }}
-    form {{
+    .traffic {{
+      position: absolute;
+      left: 18px;
       display: flex;
-      gap: 8px;
-      align-items: flex-start;
-      padding-top: 10px;
-      border-top: 1px solid #e5e5ea;
+      gap: 9px;
+    }}
+    .traffic-dot {{
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }}
+    .traffic-dot.red {{ background: #ff5f57; }}
+    .traffic-dot.yellow {{ background: #ffbd2e; }}
+    .traffic-dot.green {{ background: #28c840; }}
+    .window-title {{
+      max-width: 62%;
+      overflow: hidden;
+      color: #3d3c38;
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-align: center;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .title-dot {{
+      color: var(--muted);
+      padding: 0 4px;
+    }}
+    .shortcut {{
+      position: absolute;
+      right: 18px;
+      min-width: 30px;
+      height: 22px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.7);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .status {{
+      display: none;
     }}
     .prompt-shell {{
-      display: flex;
       flex: 1;
       min-height: 0;
-      gap: 12px;
+      display: flex;
     }}
     .history-pane {{
-      width: 140px;
-      flex: 0 0 140px;
+      width: 206px;
+      flex: 0 0 206px;
       min-height: 0;
       display: flex;
       flex-direction: column;
-      border-right: 1px solid #e5e5ea;
-      padding-right: 10px;
+      padding: 12px 10px;
+      border-right: 1px solid var(--line);
+      background: var(--panel);
     }}
     .new-chat {{
       width: 100%;
-      height: 30px;
-      margin-bottom: 8px;
-      background: #0d0d0d;
+      height: 36px;
+      flex: 0 0 36px;
+      margin: 0 0 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      font: 800 14px var(--sans);
+      cursor: pointer;
+    }}
+    .new-chat::before {{
+      content: "+";
+      margin-right: 10px;
+      font-family: var(--mono);
+      font-weight: 800;
     }}
     .history-list {{
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
+      flex: 1;
       min-height: 0;
       overflow-y: auto;
+      padding: 0 2px 8px;
+    }}
+    .history-group {{
+      margin: 16px 0 7px 2px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }}
+    .history-group:first-child {{
+      margin-top: 10px;
     }}
     .history-item {{
       width: 100%;
-      min-height: 72px;
-      height: auto;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 4px;
+      min-height: 50px;
+      display: block;
+      margin-bottom: 7px;
+      padding: 9px 10px;
       border: 1px solid transparent;
-      border-radius: 6px;
+      border-radius: 8px;
       background: transparent;
-      color: #3c3c43;
-      padding: 7px 8px;
+      color: var(--ink);
       text-align: left;
-      font-weight: 500;
+      cursor: pointer;
+    }}
+    .history-item:hover {{
+      background: rgba(255, 255, 255, 0.55);
     }}
     .history-item.active {{
-      border-color: #d9d9d9;
-      background: #f4f4f4;
-      color: #0d0d0d;
+      border-color: var(--line);
+      background: #ffffff;
     }}
-    .history-item.running .history-title::after {{
-      content: " ...";
-      color: #6b7280;
+    .history-main {{
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
     }}
     .history-title {{
-      width: 100%;
+      min-width: 0;
+      flex: 1;
       overflow: hidden;
-      display: -webkit-box;
-      -webkit-box-orient: vertical;
-      -webkit-line-clamp: 3;
-      font-size: 12px;
-      line-height: 1.22;
-      max-height: 3.66em;
-      white-space: normal;
-      overflow-wrap: anywhere;
-      word-break: break-word;
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }}
     .history-time {{
-      font-size: 10px;
-      color: #8e8e93;
-      font-weight: 500;
-      flex-shrink: 0;
+      flex: 0 0 auto;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+    }}
+    .history-preview {{
+      display: block;
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--soft-ink);
+      font-size: 12px;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }}
     .chat-pane {{
       flex: 1;
@@ -994,114 +1086,251 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       min-height: 0;
       display: flex;
       flex-direction: column;
-    }}
-    textarea {{
-      flex: 1;
-      min-height: 64px;
-      max-height: 112px;
-      resize: vertical;
-      border: 1px solid #d1d1d6;
-      border-radius: 6px;
-      padding: 8px 10px;
-      font: inherit;
-      line-height: 1.4;
-      color: #1c1c1e;
-      outline: none;
-    }}
-    textarea:focus {{
-      border-color: #9ca3af;
-      box-shadow: 0 0 0 2px rgba(13, 13, 13, 0.08);
-    }}
-    textarea:disabled {{
-      color: #636366;
-      background: #f8f8fa;
-    }}
-    button {{
-      min-width: 56px;
-      height: 32px;
-      border: 0;
-      border-radius: 6px;
-      background: #0d0d0d;
-      color: #ffffff;
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-    }}
-    button:disabled {{
-      background: #c7c7cc;
-      cursor: default;
+      background: #ffffff;
     }}
     .conversation {{
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
       flex: 1;
       min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
       overflow-y: auto;
-      padding: 0 2px 12px 0;
+      padding: 34px 34px 26px;
+      background: #ffffff;
+    }}
+    .empty-state {{
+      width: min(420px, 88%);
+      margin: auto;
+      color: var(--soft-ink);
+      text-align: center;
+    }}
+    .terminal-glyph {{
+      width: 46px;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--field);
+      color: #67645d;
+      font-family: var(--mono);
+      font-size: 19px;
+      font-weight: 800;
+    }}
+    .empty-state h2 {{
+      margin-bottom: 4px;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 850;
+      letter-spacing: -0.02em;
+    }}
+    .empty-state p {{
+      margin-bottom: 22px;
+      font-size: 14px;
+    }}
+    .starter-list {{
+      display: grid;
+      gap: 8px;
+      margin-bottom: 24px;
+    }}
+    .starter {{
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
+    }}
+    .starter:hover {{
+      border-color: var(--line-strong);
+      background: #fbfaf6;
+    }}
+    .starter-arrow {{
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: 17px;
+      line-height: 1;
+    }}
+    .tip {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    kbd {{
+      display: inline-flex;
+      min-width: 27px;
+      height: 20px;
+      align-items: center;
+      justify-content: center;
+      margin: 0 5px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--field);
+      color: var(--soft-ink);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
     }}
     .turn {{
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 5px;
     }}
     .role {{
+      color: var(--muted);
       font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0;
+      font-weight: 800;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: #8e8e93;
     }}
     .bubble {{
-      border-radius: 6px;
-      padding: 8px 10px;
+      max-width: 86%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
       overflow-x: auto;
+      background: #fbfaf6;
+      color: var(--ink);
+      line-height: 1.55;
     }}
     .turn.user {{
       align-items: flex-end;
     }}
     .turn.user .bubble {{
-      max-width: 92%;
-      background: #f4f4f4;
-      color: #0d0d0d;
+      border-color: #111111;
+      background: #111111;
+      color: #ffffff;
+    }}
+    .turn.user .role {{
+      margin-right: 4px;
     }}
     .turn.assistant .bubble {{
-      background: #f8f8fa;
+      border-color: var(--line);
+      background: #fbfaf6;
+    }}
+    form {{
+      flex: 0 0 auto;
+      padding: 12px 12px 14px;
+      border-top: 1px solid var(--line);
+      background: #ffffff;
+    }}
+    .context-line {{
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0 0 7px 4px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .context-dot {{
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+    }}
+    .input-row {{
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }}
+    textarea {{
+      flex: 1;
+      min-height: 42px;
+      max-height: 112px;
+      resize: vertical;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      outline: none;
+      background: var(--field);
+      color: var(--ink);
+      font: 13px/1.35 var(--mono);
+    }}
+    textarea::placeholder {{
+      color: #77756d;
+    }}
+    textarea:focus {{
+      border-color: var(--line-strong);
+      box-shadow: 0 0 0 3px rgba(216, 213, 203, 0.35);
+    }}
+    textarea:disabled {{
+      color: var(--muted);
+      background: #ece9df;
+    }}
+    #send-button {{
+      min-width: 78px;
+      border: 0;
+      border-radius: 10px;
+      background: #111111;
+      color: #ffffff;
+      font: 800 13px var(--sans);
+      cursor: pointer;
+    }}
+    #send-button kbd {{
+      margin-left: 7px;
+      border-color: rgba(255, 255, 255, 0.2);
+      background: transparent;
+      color: rgba(255, 255, 255, 0.72);
+    }}
+    button:disabled,
+    #send-button:disabled {{
+      opacity: 0.45;
+      cursor: default;
     }}
     .markdown h1,
     .markdown h2,
     .markdown h3 {{
+      margin: 11px 0 6px;
+      color: var(--ink);
       font-size: 13px;
-      color: #0d0d0d;
-      margin: 12px 0 6px;
     }}
     .markdown h1:first-child,
     .markdown h2:first-child,
     .markdown h3:first-child {{ margin-top: 0; }}
-    .markdown p {{ margin: 0 0 8px; color: #3c3c43; }}
+    .markdown p {{ margin: 0 0 8px; color: var(--soft-ink); }}
     .markdown ul,
     .markdown ol {{ margin: 0 0 8px 18px; padding: 0; }}
     .markdown li {{ margin-bottom: 4px; }}
     .markdown pre {{
-      background: #1c1c1e;
-      border-radius: 6px;
-      padding: 8px 12px;
+      margin: 7px 0 10px;
+      padding: 9px 11px;
       overflow-x: auto;
-      margin: 6px 0 10px;
+      border-radius: 8px;
+      background: #1d1d1b;
     }}
     .markdown code {{
-      font-family: "Menlo", "Monaco", "Courier New", monospace;
-      font-size: 12px;
-      background: #f2f2f7;
-      border-radius: 4px;
       padding: 1px 4px;
+      border-radius: 4px;
+      background: #eeebe2;
+      font-family: var(--mono);
+      font-size: 12px;
     }}
     .markdown pre code {{
-      color: #ececf1;
-      background: transparent;
-      border-radius: 0;
       padding: 0;
+      border-radius: 0;
+      background: transparent;
+      color: #f4f1e7;
     }}
+    ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
+    ::-webkit-scrollbar-thumb {{
+      border: 3px solid transparent;
+      border-radius: 999px;
+      background-clip: padding-box;
+      background-color: rgba(80, 77, 68, 0.24);
+    }}
+    ::-webkit-scrollbar-track {{ background: transparent; }}
     @keyframes dots {{
       0% {{ content: ""; }}
       25% {{ content: "."; }}
@@ -1111,23 +1340,37 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
   </style>
 </head>
 <body>
-  <header>
-    <h1>🔍 TermFix</h1>
-    <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
-  </header>
+  <div class="window">
+    <header class="window-bar">
+      <div class="traffic" aria-hidden="true">
+        <span class="traffic-dot red"></span>
+        <span class="traffic-dot yellow"></span>
+        <span class="traffic-dot green"></span>
+      </div>
+      <h1 class="window-title">TermFix{title_suffix}</h1>
+      <kbd class="shortcut">&#8984;L</kbd>
+      <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
+    </header>
 
-  <div class="prompt-shell">
-    <aside class="history-pane">
-      <button id="new-chat-button" class="new-chat" type="button">New</button>
-      <div id="history-list" class="history-list">{history}</div>
-    </aside>
-    <section class="chat-pane">
-      <div id="content" class="conversation">{body}</div>
-      <form id="prompt-form">
-        <textarea id="prompt-input" placeholder="Ask about this terminal session" autofocus></textarea>
-        <button id="send-button" type="submit">Send</button>
-      </form>
-    </section>
+    <div class="prompt-shell">
+      <aside class="history-pane">
+        <button id="new-chat-button" class="new-chat" type="button">New chat</button>
+        <div id="history-list" class="history-list">{history}</div>
+      </aside>
+      <section class="chat-pane">
+        <div id="content" class="conversation">{body}</div>
+        <form id="prompt-form">
+          <div class="context-line">
+            <span class="context-dot" aria-hidden="true"></span>
+            <span>{context_label}</span>
+          </div>
+          <div class="input-row">
+            <textarea id="prompt-input" placeholder="Ask about this terminal session..." autofocus></textarea>
+            <button id="send-button" type="submit">Send <kbd>&#8984;&#8617;</kbd></button>
+          </div>
+        </form>
+      </section>
+    </div>
   </div>
 
   <script>
@@ -1305,6 +1548,15 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         return;
       }}
       setActiveEntry(item.getAttribute("data-entry-id"));
+    }});
+
+    contentEl.addEventListener("click", (event) => {{
+      const starter = event.target.closest("[data-prompt]");
+      if (!starter || busy) {{
+        return;
+      }}
+      promptEl.value = starter.getAttribute("data-prompt") || "";
+      promptEl.focus();
     }});
 
     promptEl.addEventListener("compositionstart", () => {{
@@ -1515,25 +1767,63 @@ def _prompt_history_to_html(
     active_entry_id: str,
 ) -> str:
     """Render prompt history buttons for the current terminal session."""
-    entries = [entry for entry in state.prompts if entry.session_id == session_id]
+    entries = [
+        entry for entry in state.prompts if entry.session_id == session_id and entry.messages
+    ]
     if not entries:
         return ""
 
     blocks: list[str] = []
+    last_group = ""
     for entry in reversed(entries[-20:]):
+        group = _prompt_history_group(entry.timestamp)
+        if group != last_group:
+            blocks.append(f'<div class="history-group">{html.escape(group)}</div>')
+            last_group = group
+
         active = " active" if entry.id == active_entry_id else ""
         status = " running" if entry.status == "streaming" else ""
-        title = html.escape(_prompt_history_title(entry))
+        title = html.escape(_prompt_history_title(entry, limit=30))
         full_title = html.escape(_prompt_history_title(entry, limit=None))
-        subtitle = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
+        preview = html.escape(_prompt_history_preview(entry))
+        timestamp = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
         blocks.append(
             f'<button class="history-item{active}{status}" '
             f'data-entry-id="{html.escape(entry.id)}" title="{full_title}" type="button">'
+            '<span class="history-main">'
             f'<span class="history-title">{title}</span>'
-            f'<span class="history-time">{subtitle}</span>'
+            f'<span class="history-time">{timestamp}</span>'
+            "</span>"
+            f'<span class="history-preview">{preview}</span>'
             "</button>"
         )
     return "\n".join(blocks)
+
+
+def _prompt_cwd_label(context: dict) -> str:
+    """Return a compact cwd label for the prompt window title."""
+    cwd = str((context or {}).get("cwd") or "").strip()
+    if not cwd:
+        return ""
+
+    home = os.path.expanduser("~")
+    if cwd == home:
+        return "~"
+    if cwd.startswith(home + os.sep):
+        return "~" + cwd[len(home) :]
+    return cwd
+
+
+def _prompt_history_group(timestamp: float) -> str:
+    day = time.strftime("%Y-%m-%d", time.localtime(timestamp))
+    today = time.strftime("%Y-%m-%d", time.localtime())
+    yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+
+    if day == today:
+        return "TODAY"
+    if day == yesterday:
+        return "YESTERDAY"
+    return time.strftime("%b %d", time.localtime(timestamp)).upper()
 
 
 def _prompt_history_title(entry: PromptEntry, limit: Optional[int] = 48) -> str:
@@ -1548,6 +1838,44 @@ def _prompt_history_title(entry: PromptEntry, limit: Optional[int] = 48) -> str:
                 return title[:limit] + "..."
             return title
     return "New chat"
+
+
+def _prompt_history_preview(entry: PromptEntry, limit: int = 36) -> str:
+    """Return one secondary line for the history list."""
+    for message in reversed(entry.messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "assistant":
+            continue
+        preview = _compact_text(str(message.get("content") or ""))
+        if preview:
+            return _truncate_text(preview, limit)
+
+    if entry.result:
+        preview = _compact_text(entry.result)
+        if preview:
+            return _truncate_text(preview, limit)
+
+    title = _compact_text(_prompt_history_title(entry, limit=None))
+    return _truncate_text(title, limit)
+
+
+def _compact_text(text: str) -> str:
+    """Collapse markdown-ish text into a single plain preview line."""
+    cleaned = (
+        text.replace("`", "")
+        .replace("#", "")
+        .replace("*", "")
+        .replace(">", "")
+        .replace("-", " ")
+    )
+    return " ".join(cleaned.split())
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
 
 
 def _conversation_to_html(messages: list[dict], current_response: str = "") -> str:
@@ -1582,7 +1910,30 @@ def _conversation_to_html(messages: list[dict], current_response: str = "") -> s
             "</section>"
         )
 
-    return "\n".join(blocks)
+    if blocks:
+        return "\n".join(blocks)
+
+    return """\
+<div class="empty-state">
+  <div class="terminal-glyph">$_</div>
+  <h2>Stuck on a command?</h2>
+  <p>Ask about the last error, or paste a command for help.</p>
+  <div class="starter-list">
+    <button class="starter" type="button" data-prompt="Why did this command fail?">
+      <span class="starter-arrow">&rsaquo;</span>
+      <span>Why did this command fail?</span>
+    </button>
+    <button class="starter" type="button" data-prompt="Explain the last output">
+      <span class="starter-arrow">&rsaquo;</span>
+      <span>Explain the last output</span>
+    </button>
+    <button class="starter" type="button" data-prompt="Suggest a fix for this error">
+      <span class="starter-arrow">&rsaquo;</span>
+      <span>Suggest a fix for this error</span>
+    </button>
+  </div>
+  <div class="tip">Tip &middot; Press <kbd>&#8984;L</kbd> anywhere in the terminal</div>
+</div>"""
 
 
 def _plain_text_to_html(text: str) -> str:

@@ -10,8 +10,8 @@ STATUS_ERROR_FMT = "🔴 Fix ({count})"
 # Popover dimensions
 POPOVER_WIDTH = 450
 POPOVER_HEIGHT = 350
-PROMPT_POPOVER_WIDTH = 640
-PROMPT_POPOVER_HEIGHT = 480
+PROMPT_POPOVER_WIDTH = 800
+PROMPT_POPOVER_HEIGHT = 540
 
 # Persistent prompt conversation history
 PROMPT_HISTORY_PATH = os.path.expanduser(
