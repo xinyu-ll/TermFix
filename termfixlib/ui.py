@@ -32,7 +32,7 @@ from .config import (
     STATUS_IDENTIFIER,
     STATUS_NORMAL,
 )
-from .context import collect_context
+from .context import MAX_TERMINAL_CONTEXT_LINES, collect_context
 from .llm_client import stream_analyze_error, stream_user_prompt
 from .monitor import PromptEntry
 
@@ -1758,7 +1758,7 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
 
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
-        state.context_lines = int(ctx_raw)
+        state.context_lines = min(int(ctx_raw), MAX_TERMINAL_CONTEXT_LINES)
 
 
 def _prompt_history_to_html(
