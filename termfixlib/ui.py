@@ -946,7 +946,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }}
     .history-item {{
       width: 100%;
-      min-height: 42px;
+      min-height: 54px;
       height: auto;
       display: flex;
       flex-direction: column;
@@ -972,8 +972,14 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     .history-title {{
       width: 100%;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-height: 1.25;
+      max-height: 2.5em;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }}
     .history-time {{
       font-size: 10px;

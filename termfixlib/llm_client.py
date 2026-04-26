@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import ssl
 import threading
 import urllib.error
 import urllib.request
+import urllib.parse
 from typing import AsyncIterator, Optional
 
 from .config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
@@ -27,6 +30,9 @@ Check your API key and network connection.
 ### Details
 Could not contact the API.
 """
+
+_USER_AGENT = "TermFix/1.0"
+_MACOS_CA_FILE = "/private/etc/ssl/cert.pem"
 
 
 class ApiError(Exception):
@@ -247,17 +253,14 @@ def _post_chat_completion(
         "messages": _build_chat_messages(system_prompt, user_message, messages),
     }
     request = urllib.request.Request(
-        url=f"{_normalise_base_url(base_url)}/chat/completions",
+        url=_chat_completions_url(base_url),
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
+        headers=_request_headers(api_key),
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
+        with _urlopen(request, timeout=45) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -292,13 +295,9 @@ def _post_chat_completion_stream(
         "messages": _build_chat_messages(system_prompt, user_message, messages),
     }
     request = urllib.request.Request(
-        url=f"{_normalise_base_url(base_url)}/chat/completions",
+        url=_chat_completions_url(base_url),
         data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        },
+        headers=_request_headers(api_key, accept="text/event-stream"),
         method="POST",
     )
 
@@ -306,7 +305,7 @@ def _post_chat_completion_stream(
     yielded = False
 
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with _urlopen(request, timeout=60) as response:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or line.startswith(":"):
@@ -379,6 +378,39 @@ def _extract_content(content) -> str:
     return ""
 
 
+def _request_headers(api_key: str, accept: Optional[str] = None) -> dict[str, str]:
+    """Build headers without urllib's default Python User-Agent.
+
+    Some OpenAI-compatible proxy providers sit behind Cloudflare rules that
+    reject Python-urllib's default User-Agent with HTTP 403.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "User-Agent": _USER_AGENT,
+    }
+    if accept:
+        headers["Accept"] = accept
+    return headers
+
+
+def _urlopen(request: urllib.request.Request, timeout: int):
+    """Open a request with a macOS CA fallback for iTerm2's embedded Python."""
+    context = _ssl_context()
+    if context is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=context)
+
+
+def _ssl_context() -> Optional[ssl.SSLContext]:
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile and os.path.exists(paths.cafile):
+        return None
+    if os.path.exists(_MACOS_CA_FILE):
+        return ssl.create_default_context(cafile=_MACOS_CA_FILE)
+    return None
+
+
 def _extract_error_message(body: str) -> str:
     """Best-effort extraction of an error message from an API error payload."""
     try:
@@ -427,3 +459,18 @@ def _normalise_base_url(base_url: str) -> str:
     if not cleaned:
         return DEFAULT_BASE_URL
     return cleaned.rstrip("/")
+
+
+def _chat_completions_url(base_url: str) -> str:
+    """Resolve a user-provided base URL into a chat-completions endpoint."""
+    cleaned = _normalise_base_url(base_url)
+    if cleaned.endswith("/chat/completions"):
+        return cleaned
+    if cleaned.endswith("/v1"):
+        return f"{cleaned}/chat/completions"
+
+    parsed = urllib.parse.urlparse(cleaned)
+    path = parsed.path.rstrip("/")
+    if not path and parsed.netloc == "api.openai.com":
+        return f"{cleaned}/v1/chat/completions"
+    return f"{cleaned}/chat/completions"
