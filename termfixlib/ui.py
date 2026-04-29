@@ -66,6 +66,11 @@ _API_KEY_LABEL_RE = re.compile(
     r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|bearer|token)\s*[:=]",
     re.IGNORECASE,
 )
+_API_KEY_LABELED_VALUE_RE = re.compile(
+    r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|token)\s*[:=]\s*(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_API_KEY_BEARER_RE = re.compile(r"^\s*bearer\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _CODE_BLOCK_COPY_CSS = """\
     .code-block {
       position: relative;
@@ -2574,10 +2579,11 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if base_url_error:
             logger.warning("Ignoring Base URL setting: %s", base_url_error)
 
+    previous_api_key_error = getattr(state, "api_key_error", "")
     api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
     state.api_key = api_key
     state.api_key_error = api_key_error
-    if api_key_error:
+    if api_key_error and api_key_error != previous_api_key_error:
         logger.warning("Ignoring API key setting: %s", api_key_error)
 
     model = knobs.get("model", "").strip()
@@ -2626,6 +2632,15 @@ def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob v
     api_key = str(value or "").strip()
     if not api_key:
         return "", ""
+
+    labeled_match = _API_KEY_LABELED_VALUE_RE.match(api_key)
+    if labeled_match:
+        api_key = labeled_match.group(1).strip()
+
+    bearer_match = _API_KEY_BEARER_RE.match(api_key)
+    if bearer_match:
+        api_key = bearer_match.group(1).strip()
+
     if _API_KEY_LABEL_RE.search(api_key):
         return "", "Remove label text such as 'API Key:' and paste only the key."
     if any(char.isspace() for char in api_key):

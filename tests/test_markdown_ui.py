@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -320,14 +321,47 @@ def test_sync_knobs_updates_settings_and_parses_context_lines():
     assert state.api_key == ""
     assert state.api_key_error == "API key contains internal whitespace; paste only the key."
 
-    _sync_knobs(state, {"api_key": "API Key: sk-test"})
+    _sync_knobs(state, {"api_key": "API Key: sk-labeled"})
 
-    assert state.api_key == ""
-    assert state.api_key_error == "Remove label text such as 'API Key:' and paste only the key."
+    assert state.api_key == "sk-labeled"
+    assert state.api_key_error == ""
+
+    _sync_knobs(state, {"api_key": "Bearer sk-bearer"})
+
+    assert state.api_key == "sk-bearer"
+    assert state.api_key_error == ""
+
+    _sync_knobs(state, {"api_key": "Authorization: Bearer sk-auth"})
+
+    assert state.api_key == "sk-auth"
+    assert state.api_key_error == ""
 
     _sync_knobs(state, {"context_lines": "not-a-number"})
 
     assert state.context_lines == 8
+
+
+def test_sync_knobs_logs_repeated_api_key_validation_error_once(caplog):
+    state = SimpleNamespace(
+        base_url="old",
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="termfixlib.ui"):
+        _sync_knobs(state, {"api_key": "sk-test extra-token"})
+        _sync_knobs(state, {"api_key": "sk-test extra-token"})
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "Ignoring API key setting" in record.getMessage()
+    ]
+    assert messages == [
+        "Ignoring API key setting: API key contains internal whitespace; paste only the key."
+    ]
 
 
 def test_sync_knobs_preserves_previous_values_for_invalid_runtime_config():
