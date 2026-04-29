@@ -364,6 +364,38 @@ def test_sync_knobs_logs_repeated_api_key_validation_error_once(caplog):
     ]
 
 
+def test_sync_knobs_preserves_api_key_when_knob_payload_omits_it():
+    state = SimpleNamespace(
+        base_url="old",
+        api_key="sk-existing",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    _sync_knobs(state, {"model": "new-model"})
+
+    assert state.api_key == "sk-existing"
+    assert state.api_key_error == ""
+    assert state.model == "new-model"
+
+
+def test_sync_knobs_uses_environment_api_key_when_knob_is_blank(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "Bearer sk-env")
+    state = SimpleNamespace(
+        base_url="old",
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    _sync_knobs(state, {"api_key": ""})
+
+    assert state.api_key == "sk-env"
+    assert state.api_key_error == ""
+
+
 def test_sync_knobs_preserves_previous_values_for_invalid_runtime_config():
     state = SimpleNamespace(
         base_url="https://api.example.com/v1",

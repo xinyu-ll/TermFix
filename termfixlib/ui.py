@@ -71,6 +71,7 @@ _API_KEY_LABELED_VALUE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _API_KEY_BEARER_RE = re.compile(r"^\s*bearer\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_API_KEY_ENV_VARS = ("TERMFIX_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
 _CODE_BLOCK_COPY_CSS = """\
     .code-block {
       position: relative;
@@ -2579,12 +2580,15 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if base_url_error:
             logger.warning("Ignoring Base URL setting: %s", base_url_error)
 
-    previous_api_key_error = getattr(state, "api_key_error", "")
-    api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
-    state.api_key = api_key
-    state.api_key_error = api_key_error
-    if api_key_error and api_key_error != previous_api_key_error:
-        logger.warning("Ignoring API key setting: %s", api_key_error)
+    if "api_key" in knobs:
+        previous_api_key_error = getattr(state, "api_key_error", "")
+        api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
+        if not api_key and not api_key_error:
+            api_key, api_key_error = _api_key_from_env()
+        state.api_key = api_key
+        state.api_key_error = api_key_error
+        if api_key_error and api_key_error != previous_api_key_error:
+            logger.warning("Ignoring API key setting: %s", api_key_error)
 
     model = knobs.get("model", "").strip()
     if model:
@@ -2646,6 +2650,15 @@ def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob v
     if any(char.isspace() for char in api_key):
         return "", "API key contains internal whitespace; paste only the key."
     return api_key, ""
+
+
+def _api_key_from_env() -> tuple[str, str]:
+    """Return the first configured API key environment variable."""
+    for name in _API_KEY_ENV_VARS:
+        api_key, api_key_error = _normalize_api_key(os.environ.get(name, ""))
+        if api_key or api_key_error:
+            return api_key, api_key_error
+    return "", ""
 
 
 def _prompt_history_to_html(
