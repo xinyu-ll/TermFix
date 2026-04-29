@@ -20,7 +20,10 @@ except ImportError:  # Allows pure state/history helpers to be imported outside 
 from .config import (
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LINES,
+    DEFAULT_FIX_HOTKEY,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    DEFAULT_PROMPT_HOTKEY,
     PROMPT_HISTORY_LIMIT,
     PROMPT_HISTORY_PATH,
 )
@@ -148,9 +151,17 @@ class TermFixState:
         self.prompts: list[PromptEntry] = self._load_prompt_history()
 
         self.api_key: str = ""
+        self.api_key_error: str = ""
         self.base_url: str = DEFAULT_BASE_URL
+        self.base_url_error: str = ""
         self.model: str = DEFAULT_MODEL
         self.context_lines: int = DEFAULT_CONTEXT_LINES
+        self.max_tokens: int = DEFAULT_MAX_TOKENS
+        self.max_tokens_error: str = ""
+        self.fix_hotkey: str = DEFAULT_FIX_HOTKEY
+        self.fix_hotkey_error: str = ""
+        self.prompt_hotkey: str = DEFAULT_PROMPT_HOTKEY
+        self.prompt_hotkey_error: str = ""
         self.analyzing: bool = False
         self.analysis_tasks: dict[str, asyncio.Task] = {}
 
@@ -160,9 +171,11 @@ class TermFixState:
         self.status_server = None
         self.status_server_url: str = ""
         self.status_server_token: str = ""
+        self.terminal_sessions: dict[str, iterm2.Session] = {}
         self.prompt_sessions: dict[str, iterm2.Session] = {}
         self.popover_last_seen: dict[str, float] = {}
         self.popover_close_requests: set[str] = set()
+        self.last_viewed_error_id: str = ""
 
     async def add_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
@@ -208,6 +221,18 @@ class TermFixState:
                 return entry
         return None
 
+    def last_viewed_error(self, session_id: Optional[str] = None) -> Optional[ErrorEntry]:
+        with self._state_lock:
+            if not self.last_viewed_error_id:
+                return None
+            for entry in reversed(self.errors):
+                if entry.id != self.last_viewed_error_id:
+                    continue
+                if session_id is not None and entry.session_id != session_id:
+                    return None
+                return entry
+        return None
+
     def get_error(self, entry_id: str) -> Optional[ErrorEntry]:
         with self._state_lock:
             for entry in self.errors:
@@ -224,6 +249,7 @@ class TermFixState:
             entry.handled = True
             entry.handled_at = handled_at
             entry.updated_at = handled_at
+            self.last_viewed_error_id = entry.id
             self._prune_error_history()
             return True
 
@@ -265,6 +291,8 @@ class TermFixState:
                 return False
             self.popover_last_seen.pop(entry.id, None)
             self.popover_close_requests.discard(entry.id)
+            if self.last_viewed_error_id == entry.id:
+                self.last_viewed_error_id = ""
             return True
 
     def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
@@ -439,6 +467,7 @@ async def _session_worker(
     ]
 
     logger.debug("Worker started for session %s", session_id)
+    state.terminal_sessions[session_id] = session
     try:
         async with iterm2.PromptMonitor(connection, session_id, modes=modes) as mon:
             while True:
@@ -522,6 +551,7 @@ async def _handle_error(
         command,
     )
     try:
+        state.terminal_sessions[session.session_id] = session
         ctx = await collect_context(
             connection,
             session,

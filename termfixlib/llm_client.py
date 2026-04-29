@@ -17,7 +17,7 @@ import urllib.request
 import urllib.parse
 from typing import Any, AsyncIterator, Callable, Optional, TypeVar
 
-from .config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
+from .config import DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS, DEFAULT_MODEL, SYSTEM_PROMPT
 from .context import build_manual_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
@@ -83,6 +83,7 @@ async def analyze_error(
     api_key: str,
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> AnalysisResult:
     """Call an OpenAI-compatible endpoint and return Markdown."""
     result = ""
@@ -91,6 +92,7 @@ async def analyze_error(
         api_key=api_key,
         base_url=base_url,
         model=model,
+        max_tokens=max_tokens,
     ):
         result = snapshot
     return result or _EMPTY_RESULT
@@ -101,6 +103,7 @@ async def stream_analyze_error(
     api_key: str,
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> AsyncIterator[AnalysisResult]:
     """Call an OpenAI-compatible endpoint and yield cumulative Markdown snapshots."""
     if not api_key:
@@ -122,7 +125,7 @@ TermFix needs a provider API key before it can analyze terminal errors.
     try:
         logger.info("Starting LLM analysis via %s model=%s", base_url, model)
         result = ""
-        async for snapshot in _stream_api(api_key, base_url, model, user_message):
+        async for snapshot in _stream_api(api_key, base_url, model, user_message, max_tokens=max_tokens):
             result = snapshot
             yield snapshot
         logger.info("LLM analysis completed (%d chars)", len(result))
@@ -152,6 +155,7 @@ async def stream_user_prompt(
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_MODEL,
     messages: Optional[list[dict]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> AsyncIterator[AnalysisResult]:
     """Call the model with terminal context in system prompt and user text/history."""
     if not api_key:
@@ -179,6 +183,7 @@ TermFix needs a provider API key before it can answer a prompt.
             model,
             user_prompt,
             system_prompt,
+            max_tokens=max_tokens,
             messages=messages,
         ):
             result = snapshot
@@ -210,6 +215,7 @@ async def _call_api(
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
     messages: Optional[list[dict]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> AnalysisResult:
     """Make the actual API call and return Markdown."""
     response_text = await _run_blocking_in_thread(
@@ -220,6 +226,7 @@ async def _call_api(
         user_message,
         system_prompt,
         messages,
+        max_tokens,
     )
 
     logger.debug("LLM response received (%d chars)", len(response_text))
@@ -233,6 +240,7 @@ async def _stream_api(
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
     messages: Optional[list[dict]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> AsyncIterator[AnalysisResult]:
     """Stream cumulative Markdown snapshots from the provider without blocking the loop."""
     loop = asyncio.get_running_loop()
@@ -250,6 +258,7 @@ async def _stream_api(
                 user_message,
                 system_prompt,
                 messages,
+                max_tokens,
             ):
                 emit("snapshot", snapshot)
             emit("done")
@@ -277,11 +286,12 @@ def _post_chat_completion(
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
     messages: Optional[list[dict]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> str:
     """Send a chat-completions request using urllib."""
     payload = {
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "temperature": 0.1,
         "stream": False,
         "messages": _build_chat_messages(system_prompt, user_message, messages),
@@ -331,11 +341,12 @@ def _post_chat_completion_stream(
     user_message: str,
     system_prompt: str = SYSTEM_PROMPT,
     messages: Optional[list[dict]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ):
     """Send a streaming chat-completions request and yield cumulative content."""
     payload = {
         "model": model,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
         "temperature": 0.1,
         "stream": True,
         "messages": _build_chat_messages(system_prompt, user_message, messages),

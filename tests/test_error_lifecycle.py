@@ -10,8 +10,14 @@ from unittest import mock
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
 from termfixlib import monitor
-from termfixlib.monitor import ErrorEntry, TermFixState
-from termfixlib.ui import _ensure_status_server, _entry_payload, _pick_entry, _status_endpoint
+from termfixlib.monitor import ErrorEntry, PromptEntry, TermFixState
+from termfixlib.ui import (
+    _cancel_analysis,
+    _ensure_status_server,
+    _entry_payload,
+    _pick_entry,
+    _status_endpoint,
+)
 
 
 def _entry(session_id: str, command: str, handled: bool = False) -> ErrorEntry:
@@ -202,7 +208,7 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertEqual(11, results.count(False))
         self.assertNotIn(entry_id, state.popover_close_requests)
 
-    def test_picker_ignores_handled_entries_and_prefers_clicked_session(self):
+    def test_picker_prefers_unhandled_entries_before_last_viewed_result(self):
         state = TermFixState()
         state.errors.extend(
             [
@@ -221,8 +227,51 @@ class ErrorLifecycleTest(unittest.TestCase):
 
         state.mark_error_handled(state.errors[2].id)
 
-        self.assertIsNone(_pick_entry(state, "session-a"))
-        self.assertIsNone(_pick_entry(state, None))
+        self.assertEqual(_pick_entry(state, "session-a").command, "global-pending")
+        self.assertEqual(_pick_entry(state, None).command, "global-pending")
+
+    def test_closed_viewed_error_can_be_reopened_until_new_error_arrives(self):
+        state = TermFixState()
+        viewed = _entry("session-a", "pytest")
+        viewed.result = "Try the focused assertion."
+        viewed.status = "done"
+        state.errors.append(viewed)
+
+        payload = _entry_payload(state, viewed.id)
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(viewed.handled)
+        self.assertEqual(_pick_entry(state, "session-a"), viewed)
+
+        fresh = _entry("session-a", "make test")
+        state.errors.append(fresh)
+
+        self.assertEqual(_pick_entry(state, "session-a"), fresh)
+
+    def test_cancel_analysis_cancels_prompt_task_and_preserves_partial_result(self):
+        state = TermFixState()
+        prompt = PromptEntry(session_id="session-a", context={})
+        prompt.status = "streaming"
+        prompt.result = "Partial response"
+        state.prompts.append(prompt)
+
+        async def never_finishes() -> None:
+            await asyncio.Event().wait()
+
+        async def run() -> dict:
+            task = asyncio.create_task(never_finishes())
+            state.analysis_tasks[prompt.id] = task
+            payload = await _cancel_analysis(prompt.id, state)
+            await asyncio.sleep(0)
+            self.assertTrue(task.cancelled())
+            return payload
+
+        payload = self._main_loop.run_until_complete(run())
+
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["cancelled"], True)
+        self.assertEqual(prompt.status, "cancelled")
+        self.assertEqual(prompt.result, "Partial response")
 
     def test_prompt_event_info_log_does_not_include_raw_payload(self):
         secret_payload = "deploy --token=secret"
@@ -309,5 +358,6 @@ class ErrorLifecycleTest(unittest.TestCase):
 
         self.assertEqual(payload, {"ok": True})
         self.assertTrue(pending.handled)
+        self.assertEqual(_pick_entry(state, "session-a"), pending)
         self.assertNotIn(pending.id, state.popover_last_seen)
         self.assertNotIn(pending.id, state.popover_close_requests)

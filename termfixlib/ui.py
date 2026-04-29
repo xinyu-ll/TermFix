@@ -29,9 +29,14 @@ except ImportError:  # Allows pure rendering helpers to be imported outside iTer
 from .config import (
     DEFAULT_BASE_URL,
     DEFAULT_CONTEXT_LINES,
+    DEFAULT_FIX_HOTKEY,
+    DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
+    DEFAULT_PROMPT_HOTKEY,
     MAX_CONTEXT_LINES,
+    MAX_MAX_TOKENS,
     MIN_CONTEXT_LINES,
+    MIN_MAX_TOKENS,
     POPOVER_HEIGHT,
     POPOVER_WIDTH,
     PROMPT_POPOVER_HEIGHT,
@@ -39,6 +44,9 @@ from .config import (
     STATUS_ERROR_FMT,
     STATUS_IDENTIFIER,
     STATUS_NORMAL,
+    normalize_base_url,
+    normalize_command_hotkey,
+    normalize_max_tokens,
 )
 from .context import collect_context, normalize_context_lines
 from .llm_client import stream_analyze_error, stream_user_prompt
@@ -51,7 +59,9 @@ _PROMPT_POPOVER_ID = "__prompt__"
 _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
 _POPOVER_CORS_ORIGIN = "null"
-_POPOVER_ROUTES = frozenset({"/closed", "/prompt/new", "/prompt", "/state"})
+_POPOVER_ROUTES = frozenset(
+    {"/cancel", "/closed", "/insert", "/prompt/new", "/prompt", "/state"}
+)
 _API_KEY_LABEL_RE = re.compile(
     r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|bearer|token)\s*[:=]",
     re.IGNORECASE,
@@ -64,13 +74,17 @@ _CODE_BLOCK_COPY_CSS = """\
       background: #1d1d1b;
       overflow: hidden;
     }
-    .copy-code {
+    .code-actions {
       position: absolute;
       top: 7px;
       right: 7px;
       z-index: 1;
+      display: flex;
+      gap: 5px;
+    }
+    .code-action {
       height: 24px;
-      min-width: 48px;
+      min-width: 50px;
       padding: 0 8px;
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 6px;
@@ -79,18 +93,24 @@ _CODE_BLOCK_COPY_CSS = """\
       font: 700 11px var(--sans, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif);
       cursor: pointer;
     }
-    .copy-code:hover {
+    .code-action:hover {
       background: rgba(255, 255, 255, 0.14);
       color: #ffffff;
     }
-    .copy-code.copied {
+    .code-action.copied,
+    .code-action.inserted {
       color: #ffffff;
       background: rgba(36, 165, 121, 0.5);
+    }
+    .code-action.needs-manual-copy,
+    .code-action.error {
+      color: #ffffff;
+      background: rgba(191, 90, 90, 0.55);
     }
     .markdown pre {
       margin: 0;
       padding: 9px 11px;
-      padding-right: 68px;
+      padding-right: 132px;
       overflow-x: auto;
       background: #1d1d1b;
     }
@@ -109,38 +129,88 @@ _CODE_BLOCK_COPY_JS = """\
       document.body.appendChild(copyTarget);
       copyTarget.select();
       try {
-        document.execCommand("copy");
+        if (!document.execCommand("copy")) {
+          throw new Error("Clipboard copy failed.");
+        }
       } finally {
         document.body.removeChild(copyTarget);
+      }
+    }
+
+    function selectCodeText(code) {
+      const selection = window.getSelection ? window.getSelection() : null;
+      const range = document.createRange ? document.createRange() : null;
+      if (!selection || !range) {
+        return false;
+      }
+      range.selectNodeContents(code);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    }
+
+    function resetCodeButton(button, label, className, delay) {
+      setTimeout(() => {
+        button.textContent = label;
+        if (className) {
+          button.classList.remove(className);
+        }
+      }, delay);
+    }
+
+    async function insertCodeText(text) {
+      if (typeof insertEndpoint !== "string" || !insertEndpoint) {
+        throw new Error("Insert endpoint is unavailable.");
+      }
+      const response = await fetch(insertEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      const data = await response.json();
+      if (!data.ok) {
+        throw new Error(data.error || "Insert failed.");
       }
     }
 
     function handleCodeBlockCopy(event) {
       const target = event.target && event.target.closest ? event.target : null;
       const copyButton = target ? target.closest("[data-copy-code]") : null;
-      if (!copyButton) {
+      const insertButton = target ? target.closest("[data-insert-code]") : null;
+      const actionButton = copyButton || insertButton;
+      if (!actionButton) {
         return false;
       }
 
-      const block = copyButton.closest(".code-block");
+      const block = actionButton.closest(".code-block");
       const code = block ? block.querySelector("code") : null;
       if (!code) {
+        return true;
+      }
+
+      if (insertButton) {
+        insertCodeText(code.textContent || "").then(() => {
+          insertButton.textContent = "Inserted";
+          insertButton.classList.add("inserted");
+          resetCodeButton(insertButton, "Insert", "inserted", 1400);
+        }).catch((error) => {
+          insertButton.textContent = error.message || "Insert failed";
+          insertButton.classList.add("error");
+          resetCodeButton(insertButton, "Insert", "error", 2200);
+        });
         return true;
       }
 
       copyText(code.textContent || "").then(() => {
         copyButton.textContent = "Copied";
         copyButton.classList.add("copied");
-        setTimeout(() => {
-          copyButton.textContent = "Copy";
-          copyButton.classList.remove("copied");
-        }, 1200);
+        resetCodeButton(copyButton, "Copy", "copied", 1200);
       }).catch(() => {
-        copyButton.textContent = "Failed";
+        const selected = selectCodeText(code);
+        copyButton.textContent = selected ? "Selected - Cmd+C" : "Select code";
         copyButton.classList.remove("copied");
-        setTimeout(() => {
-          copyButton.textContent = "Copy";
-        }, 1200);
+        copyButton.classList.add("needs-manual-copy");
+        resetCodeButton(copyButton, "Copy", "needs-manual-copy", 2800);
       });
       return true;
     }
@@ -190,6 +260,24 @@ async def register_status_bar(
             placeholder=str(DEFAULT_CONTEXT_LINES),
             default_value=str(DEFAULT_CONTEXT_LINES),
             key="context_lines",
+        ),
+        iterm2.StringKnob(
+            name=f"Max Tokens ({MIN_MAX_TOKENS}-{MAX_MAX_TOKENS})",
+            placeholder=str(DEFAULT_MAX_TOKENS),
+            default_value=str(DEFAULT_MAX_TOKENS),
+            key="max_tokens",
+        ),
+        iterm2.StringKnob(
+            name="Fix Hotkey",
+            placeholder=DEFAULT_FIX_HOTKEY,
+            default_value=DEFAULT_FIX_HOTKEY,
+            key="fix_hotkey",
+        ),
+        iterm2.StringKnob(
+            name="Prompt Hotkey",
+            placeholder=DEFAULT_PROMPT_HOTKEY,
+            default_value=DEFAULT_PROMPT_HOTKEY,
+            key="prompt_hotkey",
         ),
     ]
 
@@ -249,16 +337,15 @@ async def start_hotkey_listener(
     state: "TermFixState",
 ) -> None:
     """Listen for TermFix hotkeys in the active session."""
-    fix_pattern = _build_command_key_pattern(iterm2.Keycode.ANSI_J)
-    prompt_pattern = _build_command_key_pattern(iterm2.Keycode.ANSI_L)
+    patterns = _build_command_letter_patterns()
 
     try:
-        logger.info("TermFix hotkey listener registered (Cmd+J, Cmd+L)")
-        async with iterm2.KeystrokeFilter(connection, [fix_pattern, prompt_pattern]):
+        logger.info("TermFix hotkey listener registered (%s, %s)", state.fix_hotkey, state.prompt_hotkey)
+        async with iterm2.KeystrokeFilter(connection, patterns):
             async with iterm2.KeystrokeMonitor(connection, advanced=True) as mon:
                 while True:
                     keystroke = await mon.async_get()
-                    hotkey = _termfix_hotkey_kind(keystroke)
+                    hotkey = _termfix_hotkey_kind(keystroke, state)
                     if hotkey is None:
                         continue
                     session_id = await _get_active_session_id(app)
@@ -462,6 +549,7 @@ async def _run_streaming_analysis(entry, state: "TermFixState") -> None:
             api_key=state.api_key,
             base_url=state.base_url,
             model=state.model,
+            max_tokens=state.max_tokens,
         ):
             entry.result = snapshot or entry.result
             entry.updated_at = time.time()
@@ -515,6 +603,7 @@ async def _run_streaming_prompt(entry: PromptEntry, state: "TermFixState") -> No
             api_key=state.api_key,
             base_url=state.base_url,
             model=state.model,
+            max_tokens=state.max_tokens,
             messages=list(entry.messages),
         ):
             entry.result = snapshot or entry.result
@@ -550,12 +639,19 @@ Check the TermFix script console for details.
 
 
 def _pick_entry(state: "TermFixState", session_id: Optional[str]):
-    """Prefer the latest unhandled error from the clicked session; fall back globally."""
+    """Prefer new errors, then reopen the last viewed result when nothing is pending."""
     if session_id:
         entry = state.latest_unhandled_error(session_id)
         if entry is not None:
             return entry
-    return state.latest_unhandled_error()
+    entry = state.latest_unhandled_error()
+    if entry is not None:
+        return entry
+    if session_id:
+        entry = state.last_viewed_error(session_id)
+        if entry is not None:
+            return entry
+    return state.last_viewed_error()
 
 
 def _notify_ui_update_from_thread(state: "TermFixState") -> None:
@@ -635,6 +731,14 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 self._send_json(_mark_popover_closed_from_thread(state, entry_id))
                 return
 
+            if request_path == "/cancel":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                self._send_json(_cancel_analysis_from_thread(state, entry_id))
+                return
+
             if request_path == "/prompt/new":
                 if self.command != "POST":
                     self.send_error(405)
@@ -662,6 +766,25 @@ def _ensure_status_server(state: "TermFixState") -> None:
                     self._send_json({"ok": False, "error": "Invalid prompt payload."})
                     return
                 self._send_json(_submit_prompt_from_thread(state, entry_id, prompt, session_id))
+                return
+
+            if request_path == "/insert":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                session_id = parse_qs(parsed.query).get("session", [""])[0]
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    content_length = 0
+                raw_body = self.rfile.read(min(content_length, 128_000))
+                try:
+                    payload = json.loads(raw_body.decode("utf-8") or "{}")
+                    text = str(payload.get("text", ""))
+                except Exception:
+                    self._send_json({"ok": False, "error": "Invalid insert payload."})
+                    return
+                self._send_json(_insert_code_from_thread(state, text, session_id))
                 return
 
             if request_path != "/state":
@@ -772,6 +895,36 @@ async def _mark_popover_closed(entry_id: str, state: "TermFixState") -> dict:
     return {"ok": True}
 
 
+def _cancel_analysis_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Cancel an in-flight error or prompt analysis task on the asyncio loop."""
+    if not entry_id:
+        return {"ok": False, "error": "Missing entry."}
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _cancel_analysis(entry_id, state),
+        "Analysis cancel",
+    )
+
+
+async def _cancel_analysis(entry_id: str, state: "TermFixState") -> dict:
+    entry = state.get_prompt(entry_id) or state.get_error(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "Entry expired."}
+
+    task = state.analysis_tasks.get(entry_id)
+    cancelled = False
+    if task is not None and not task.done():
+        task.cancel()
+        cancelled = True
+
+    if getattr(entry, "status", "") == "streaming":
+        entry.status = "cancelled"
+        entry.updated_at = time.time()
+    state.refresh_analyzing()
+    await state.notify_ui_update()
+    return {"ok": True, "cancelled": cancelled, "status": entry.status}
+
+
 def _entry_payload_from_thread(
     state: "TermFixState",
     entry_id: str,
@@ -838,6 +991,7 @@ def _entry_payload(
             "body_html": _conversation_to_html(
                 prompt_entry.messages,
                 prompt_entry.result or "",
+                prompt_entry.context,
             ),
         }
 
@@ -899,6 +1053,46 @@ def _create_prompt_from_thread(
     )
 
 
+def _insert_code_from_thread(
+    state: "TermFixState",
+    text: str,
+    popover_session_id: str = "",
+) -> dict:
+    """Insert code text into the target iTerm2 session from the HTTP handler thread."""
+    if not text:
+        return {"ok": False, "error": "Code block is empty."}
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _insert_code_text(text[:64_000], state, popover_session_id),
+        "Code insert",
+    )
+
+
+async def _insert_code_text(
+    text: str,
+    state: "TermFixState",
+    popover_session_id: str = "",
+) -> dict:
+    session, session_id = await _resolve_insert_session(state, popover_session_id)
+    if session is None:
+        return {"ok": False, "error": "Current terminal session is unavailable."}
+
+    send_text = getattr(session, "async_send_text", None)
+    if send_text is None:
+        return {"ok": False, "error": "Terminal session cannot accept inserted text."}
+
+    try:
+        try:
+            await send_text(text, suppress_broadcast=True)
+        except TypeError:
+            await send_text(text)
+    except Exception as exc:
+        logger.warning("Could not insert code into session %s: %s", session_id, exc)
+        return {"ok": False, "error": str(exc)}
+
+    return {"ok": True, "session_id": session_id}
+
+
 async def _create_prompt_entry(
     entry_id: str,
     state: "TermFixState",
@@ -943,7 +1137,10 @@ async def _submit_prompt_entry(
     ):
         return {
             "ok": False,
-            "error": "Current terminal session is unavailable or closed. Reopen Cmd+L and try again.",
+            "error": (
+                "Current terminal session is unavailable or closed. "
+                f"Reopen {getattr(state, 'prompt_hotkey', DEFAULT_PROMPT_HOTKEY)} and try again."
+            ),
         }
     entry.user_prompt = prompt
     entry.messages.append({"role": "user", "content": prompt})
@@ -968,7 +1165,41 @@ def _build_command_key_pattern(keycode) -> iterm2.KeystrokePattern:
     return pattern
 
 
-def _termfix_hotkey_kind(keystroke) -> Optional[str]:
+def _build_command_letter_patterns() -> list[iterm2.KeystrokePattern]:
+    """Build Command-only patterns for all available ANSI letter keys."""
+    patterns = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        keycode = _ansi_letter_keycode(letter)
+        if keycode is not None:
+            patterns.append(_build_command_key_pattern(keycode))
+    return patterns
+
+
+def _ansi_letter_keycode(letter: str):
+    """Return the iTerm ANSI keycode for a letter when available."""
+    if iterm2 is None:
+        return None
+    keycode = getattr(iterm2, "Keycode", None)
+    return getattr(keycode, f"ANSI_{letter.upper()}", None)
+
+
+def _keystroke_ansi_letter(keystroke) -> str:
+    """Return the ANSI letter represented by a keystroke keycode."""
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if keystroke.keycode == _ansi_letter_keycode(letter):
+            return letter
+    return ""
+
+
+def _hotkey_letter(value: str) -> str:
+    """Extract the configured letter from a normalized Cmd+X hotkey."""
+    text = str(value or "").strip()
+    if "+" not in text:
+        return ""
+    return text.rsplit("+", 1)[-1].strip().upper()
+
+
+def _termfix_hotkey_kind(keystroke, state: Optional["TermFixState"] = None) -> Optional[str]:
     """Return the TermFix action for supported key-down events."""
     if keystroke.action not in (
         iterm2.Keystroke.Action.NA,
@@ -978,9 +1209,12 @@ def _termfix_hotkey_kind(keystroke) -> Optional[str]:
     modifiers = set(keystroke.modifiers)
     if modifiers != {iterm2.Modifier.COMMAND}:
         return None
-    if keystroke.keycode == iterm2.Keycode.ANSI_J:
+    letter = _keystroke_ansi_letter(keystroke)
+    fix_hotkey = getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)
+    prompt_hotkey = getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY)
+    if letter and letter == _hotkey_letter(fix_hotkey):
         return "fix"
-    if keystroke.keycode == iterm2.Keycode.ANSI_L:
+    if letter and letter == _hotkey_letter(prompt_hotkey):
         return "prompt"
     return None
 
@@ -1012,6 +1246,12 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     body = _markdown_to_html(entry.result or "Analyzing...")
     endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": entry.id}))
     close_endpoint = json.dumps(_status_endpoint(state, "/closed", {"entry": entry.id}))
+    close_key = json.dumps(
+        _hotkey_letter(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)).lower()
+    )
+    insert_endpoint = json.dumps(
+        _status_endpoint(state, "/insert", {"session": getattr(entry, "session_id", "")})
+    )
 
     return f"""\
 <!DOCTYPE html>
@@ -1020,11 +1260,37 @@ def _build_live_html(entry, state: "TermFixState") -> str:
   <meta charset="UTF-8">
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    :root {{
+      --paper: #ffffff;
+      --panel: #ffffff;
+      --line: #e5e5ea;
+      --ink: #1c1c1e;
+      --soft-ink: #3c3c43;
+      --muted: #8e8e93;
+      --field: #f2f2f7;
+      --accent: #c0392b;
+      --code-ink: #30d158;
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      --mono: "SF Mono", "Menlo", "Monaco", "Cascadia Mono", monospace;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --paper: #1c1c1e;
+        --panel: #242426;
+        --line: #3a3a3c;
+        --ink: #f5f5f7;
+        --soft-ink: #d1d1d6;
+        --muted: #98989d;
+        --field: #2c2c2e;
+        --accent: #ff6961;
+        --code-ink: #32d74b;
+      }}
+    }}
     body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      font-family: var(--sans);
       font-size: 13px;
-      color: #1c1c1e;
-      background: #ffffff;
+      color: var(--ink);
+      background: var(--paper);
       padding: 14px 16px;
       line-height: 1.45;
     }}
@@ -1034,60 +1300,60 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       gap: 8px;
       margin-bottom: 12px;
       padding-bottom: 10px;
-      border-bottom: 1px solid #e5e5ea;
+      border-bottom: 1px solid var(--line);
     }}
-    header h1 {{ font-size: 14px; font-weight: 600; color: #c0392b; }}
+    header h1 {{ font-size: 14px; font-weight: 650; color: var(--accent); }}
     .badge {{
       font-size: 11px;
       font-weight: 500;
-      background: #f2f2f7;
+      background: var(--field);
       border-radius: 4px;
       padding: 1px 6px;
-      color: #636366;
-      font-family: "Menlo", monospace;
+      color: var(--muted);
+      font-family: var(--mono);
     }}
     .markdown h1,
     .markdown h2,
     .markdown h3 {{
       font-size: 13px;
-      color: #c0392b;
+      color: var(--accent);
       margin: 12px 0 6px;
     }}
     .markdown h1:first-child,
     .markdown h2:first-child,
     .markdown h3:first-child {{ margin-top: 0; }}
-    .markdown p {{ margin: 0 0 8px; color: #3c3c43; }}
+    .markdown p {{ margin: 0 0 8px; color: var(--soft-ink); }}
     .markdown ul,
     .markdown ol {{ margin: 0 0 8px 18px; padding: 0; }}
     .markdown li {{ margin-bottom: 4px; }}
 {_CODE_BLOCK_COPY_CSS}
     .markdown code {{
-      font-family: "Menlo", "Monaco", "Courier New", monospace;
+      font-family: var(--mono);
       font-size: 12px;
-      background: #f2f2f7;
+      background: var(--field);
       border-radius: 4px;
       padding: 1px 4px;
     }}
     .markdown pre code {{
-      font-family: "Menlo", "Monaco", "Courier New", monospace;
+      font-family: var(--mono);
       font-size: 12px;
-      color: #30d158;
+      color: var(--code-ink);
       background: transparent;
       border-radius: 0;
       padding: 0;
     }}
     .failed-cmd {{
-      font-family: "Menlo", monospace;
+      font-family: var(--mono);
       font-size: 11px;
-      color: #636366;
-      background: #f2f2f7;
+      color: var(--muted);
+      background: var(--field);
       border-radius: 4px;
       padding: 1px 6px;
     }}
     .status {{
       margin-left: auto;
       font-size: 11px;
-      color: #8e8e93;
+      color: var(--muted);
     }}
     .status.streaming::after {{
       content: "";
@@ -1105,7 +1371,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 </head>
 <body>
   <header>
-    <h1>🔍 TermFix</h1>
+    <h1>TermFix</h1>
     <span class="failed-cmd">{failed_cmd}</span>
     <span class="badge">exit {exit_code}</span>
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
@@ -1115,10 +1381,12 @@ def _build_live_html(entry, state: "TermFixState") -> str:
   <script>
     const endpoint = {endpoint};
     const closeEndpoint = {close_endpoint};
+    const insertEndpoint = {insert_endpoint};
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
     let lastHtml = contentEl.innerHTML;
     let timer = null;
+    let pollDelay = 350;
     let closing = false;
 
     function reportClosed() {{
@@ -1164,6 +1432,12 @@ def _build_live_html(entry, state: "TermFixState") -> str:
           statusEl.textContent = data.status;
           statusEl.className = "status " + data.status;
         }}
+        const nextDelay = data.done ? 2000 : 350;
+        if (timer && nextDelay !== pollDelay) {{
+          clearInterval(timer);
+          pollDelay = nextDelay;
+          timer = setInterval(refresh, pollDelay);
+        }}
       }} catch (error) {{
         statusEl.textContent = "offline";
         statusEl.className = "status error";
@@ -1174,7 +1448,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 
     document.addEventListener("keydown", (event) => {{
       if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
-          event.key && event.key.toLowerCase() === "j") {{
+          event.key && event.key.toLowerCase() === {close_key}) {{
         event.preventDefault();
         closePopover();
       }}
@@ -1187,7 +1461,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     }});
 
     refresh();
-    timer = setInterval(refresh, 350);
+    timer = setInterval(refresh, pollDelay);
   </script>
 </body>
 </html>"""
@@ -1199,15 +1473,20 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     state_endpoint = json.dumps(_status_endpoint(state, "/state"))
     submit_endpoint = json.dumps(_status_endpoint(state, "/prompt"))
     new_endpoint = json.dumps(_status_endpoint(state, "/prompt/new"))
+    cancel_endpoint = json.dumps(_status_endpoint(state, "/cancel"))
     close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
+    insert_endpoint = json.dumps(_status_endpoint(state, "/insert", {"session": entry.session_id}))
     active_entry_id = json.dumps(entry.id)
     popover_session_id = json.dumps(entry.session_id)
     history = _prompt_history_to_html(state, entry.session_id, entry.id)
-    body = _conversation_to_html(entry.messages, entry.result or "")
+    body = _conversation_to_html(entry.messages, entry.result or "", entry.context)
     cwd_label = html.escape(_prompt_cwd_label(entry.context))
     title_suffix = f' <span class="title-dot">&middot;</span> {cwd_label}' if cwd_label else ""
     context_label = html.escape(_prompt_context_label(entry, state, entry.session_id))
     context_class = html.escape(_prompt_context_class(entry, entry.session_id))
+    prompt_hotkey = getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY)
+    close_key = json.dumps(_hotkey_letter(prompt_hotkey).lower())
+    shortcut_label = html.escape(prompt_hotkey.replace("Cmd+", "⌘"))
 
     return f"""\
 <!DOCTYPE html>
@@ -1217,18 +1496,39 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
   <style>
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
     :root {{
-      --paper: #f6f4ed;
-      --panel: #f0eee7;
-      --line: #d8d5cb;
-      --line-strong: #c7c3b8;
-      --ink: #161616;
-      --soft-ink: #3b3a36;
-      --muted: #77756d;
-      --field: #f7f5ee;
+      --paper: #ffffff;
+      --panel: #f7f7f9;
+      --panel-strong: #ffffff;
+      --line: #e5e5ea;
+      --line-strong: #c7c7cc;
+      --ink: #1c1c1e;
+      --soft-ink: #3c3c43;
+      --muted: #8e8e93;
+      --field: #f2f2f7;
       --green: #24a579;
-      --shadow: 0 12px 35px rgba(40, 39, 34, 0.12);
+      --accent: #c0392b;
+      --button-bg: #111111;
+      --button-ink: #ffffff;
+      --shadow: 0 18px 45px rgba(0, 0, 0, 0.12);
       --mono: "SF Mono", "Menlo", "Monaco", "Cascadia Mono", monospace;
-      --sans: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+      --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --paper: #1c1c1e;
+        --panel: #242426;
+        --panel-strong: #2c2c2e;
+        --line: #3a3a3c;
+        --line-strong: #545458;
+        --ink: #f5f5f7;
+        --soft-ink: #d1d1d6;
+        --muted: #98989d;
+        --field: #2c2c2e;
+        --accent: #ff6961;
+        --button-bg: #f5f5f7;
+        --button-ink: #1c1c1e;
+        --shadow: 0 18px 45px rgba(0, 0, 0, 0.36);
+      }}
     }}
     html, body {{
       height: 100%;
@@ -1238,9 +1538,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       padding: 14px;
       overflow: hidden;
       color: var(--ink);
-      background:
-        linear-gradient(rgba(23, 22, 18, 0.018) 50%, transparent 50%) 0 0 / 100% 4px,
-        var(--paper);
+      background: var(--paper);
       font-family: var(--sans);
       font-size: 13px;
       line-height: 1.45;
@@ -1251,43 +1549,31 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       flex-direction: column;
       overflow: hidden;
       border: 1px solid var(--line);
-      border-radius: 14px;
-      background: #fbfbf8;
+      border-radius: 12px;
+      background: var(--panel-strong);
       box-shadow: var(--shadow);
     }}
     .window-bar {{
       position: relative;
-      height: 52px;
-      flex: 0 0 52px;
+      height: 50px;
+      flex: 0 0 50px;
       display: flex;
       align-items: center;
-      justify-content: center;
+      gap: 10px;
+      padding: 0 16px;
       border-bottom: 1px solid var(--line);
-      background: #f2f0e8;
+      background: var(--panel);
     }}
-    .traffic {{
-      position: absolute;
-      left: 18px;
-      display: flex;
-      gap: 9px;
-    }}
-    .traffic-dot {{
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-    }}
-    .traffic-dot.red {{ background: #ff5f57; }}
-    .traffic-dot.yellow {{ background: #ffbd2e; }}
-    .traffic-dot.green {{ background: #28c840; }}
     .window-title {{
-      max-width: 62%;
+      min-width: 0;
+      flex: 1;
       overflow: hidden;
-      color: #3d3c38;
-      font-family: var(--mono);
+      color: var(--ink);
+      font-family: var(--sans);
       font-size: 14px;
-      font-weight: 700;
-      letter-spacing: 0.02em;
-      text-align: center;
+      font-weight: 650;
+      letter-spacing: 0;
+      text-align: left;
       text-overflow: ellipsis;
       white-space: nowrap;
     }}
@@ -1296,8 +1582,6 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       padding: 0 4px;
     }}
     .shortcut {{
-      position: absolute;
-      right: 18px;
       min-width: 30px;
       height: 22px;
       display: inline-flex;
@@ -1305,14 +1589,35 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       justify-content: center;
       border: 1px solid var(--line);
       border-radius: 5px;
-      background: rgba(255, 255, 255, 0.7);
+      background: var(--panel-strong);
       color: var(--muted);
       font-family: var(--mono);
       font-size: 12px;
       font-weight: 700;
     }}
     .status {{
-      display: none;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+    }}
+    .status.streaming {{
+      color: var(--accent);
+    }}
+    .status.streaming::before {{
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 6px;
+      border-radius: 999px;
+      background: currentColor;
+      animation: pulse 1s ease-in-out infinite;
+    }}
+    .status.streaming::after {{
+      content: "";
+      display: inline-block;
+      width: 1em;
+      animation: dots 1.1s steps(4, end) infinite;
     }}
     .prompt-shell {{
       flex: 1;
@@ -1320,8 +1625,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       display: flex;
     }}
     .history-pane {{
-      width: 206px;
-      flex: 0 0 206px;
+      width: clamp(172px, 28%, 236px);
+      flex: 0 0 clamp(172px, 28%, 236px);
       min-height: 0;
       display: flex;
       flex-direction: column;
@@ -1336,7 +1641,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       margin: 0 0 18px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #ffffff;
+      background: var(--panel-strong);
       color: var(--ink);
       font: 800 14px var(--sans);
       cursor: pointer;
@@ -1378,11 +1683,11 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       cursor: pointer;
     }}
     .history-item:hover {{
-      background: rgba(255, 255, 255, 0.55);
+      background: var(--field);
     }}
     .history-item.active {{
       border-color: var(--line);
-      background: #ffffff;
+      background: var(--panel-strong);
     }}
     .history-main {{
       display: flex;
@@ -1430,7 +1735,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       min-height: 0;
       display: flex;
       flex-direction: column;
-      background: #ffffff;
+      background: var(--panel-strong);
     }}
     .conversation {{
       flex: 1;
@@ -1439,8 +1744,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       flex-direction: column;
       gap: 14px;
       overflow-y: auto;
-      padding: 34px 34px 26px;
-      background: #ffffff;
+      padding: clamp(22px, 4vw, 34px) clamp(22px, 4vw, 34px) 26px;
+      background: var(--panel-strong);
     }}
     .empty-state {{
       width: min(420px, 88%);
@@ -1458,7 +1763,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       border: 1px solid var(--line);
       border-radius: 12px;
       background: var(--field);
-      color: #67645d;
+      color: var(--muted);
       font-family: var(--mono);
       font-size: 19px;
       font-weight: 800;
@@ -1468,7 +1773,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       color: var(--ink);
       font-size: 17px;
       font-weight: 850;
-      letter-spacing: -0.02em;
+      letter-spacing: 0;
     }}
     .empty-state p {{
       margin-bottom: 22px;
@@ -1487,7 +1792,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       padding: 0 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: #ffffff;
+      background: var(--panel-strong);
       color: var(--ink);
       font-family: var(--mono);
       font-size: 13px;
@@ -1497,7 +1802,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }}
     .starter:hover {{
       border-color: var(--line-strong);
-      background: #fbfaf6;
+      background: var(--field);
     }}
     .starter-arrow {{
       color: var(--muted);
@@ -1543,7 +1848,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       border: 1px solid var(--line);
       border-radius: 10px;
       overflow-x: auto;
-      background: #fbfaf6;
+      background: var(--field);
       color: var(--ink);
       line-height: 1.55;
     }}
@@ -1551,22 +1856,41 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       align-items: flex-end;
     }}
     .turn.user .bubble {{
-      border-color: #111111;
-      background: #111111;
-      color: #ffffff;
+      border-color: var(--ink);
+      background: var(--button-bg);
+      color: var(--button-ink);
     }}
     .turn.user .role {{
       margin-right: 4px;
     }}
     .turn.assistant .bubble {{
       border-color: var(--line);
-      background: #fbfaf6;
+      background: var(--field);
+    }}
+    .streaming-note {{
+      display: none;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .chat-pane.busy .streaming-note {{
+      display: flex;
+    }}
+    .spinner {{
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--line);
+      border-top-color: var(--accent);
+      border-radius: 999px;
+      animation: spin 0.8s linear infinite;
     }}
     form {{
       flex: 0 0 auto;
       padding: 12px 12px 14px;
       border-top: 1px solid var(--line);
-      background: #ffffff;
+      background: var(--panel-strong);
     }}
     .context-line {{
       display: flex;
@@ -1598,7 +1922,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     textarea {{
       flex: 1;
       min-height: 42px;
-      max-height: 112px;
+      max-height: 180px;
       resize: vertical;
       padding: 12px 14px;
       border: 1px solid var(--line);
@@ -1609,33 +1933,56 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       font: 13px/1.35 var(--mono);
     }}
     textarea::placeholder {{
-      color: #77756d;
+      color: var(--muted);
     }}
     textarea:focus {{
       border-color: var(--line-strong);
-      box-shadow: 0 0 0 3px rgba(216, 213, 203, 0.35);
+      box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.16);
     }}
     textarea:disabled {{
       color: var(--muted);
-      background: #ece9df;
+      background: var(--panel);
     }}
-    #send-button {{
+    .input-actions {{
+      flex: 0 0 auto;
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }}
+    #send-button,
+    #stop-button {{
       min-width: 78px;
       border: 0;
       border-radius: 10px;
-      background: #111111;
-      color: #ffffff;
       font: 800 13px var(--sans);
       cursor: pointer;
     }}
+    #send-button {{
+      background: var(--button-bg);
+      color: var(--button-ink);
+    }}
+    #stop-button {{
+      display: none;
+      border: 1px solid #c55345;
+      background: #ffffff;
+      color: #a63b30;
+    }}
+    .input-actions.streaming #send-button {{
+      display: none;
+    }}
+    .input-actions.streaming #stop-button {{
+      display: inline-block;
+    }}
     #send-button kbd {{
       margin-left: 7px;
-      border-color: rgba(255, 255, 255, 0.2);
+      border-color: currentColor;
       background: transparent;
-      color: rgba(255, 255, 255, 0.72);
+      color: var(--button-ink);
+      opacity: 0.72;
     }}
     button:disabled,
-    #send-button:disabled {{
+    #send-button:disabled,
+    #stop-button:disabled {{
       opacity: 0.45;
       cursor: default;
     }}
@@ -1657,7 +2004,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     .markdown code {{
       padding: 1px 4px;
       border-radius: 4px;
-      background: #eeebe2;
+      background: var(--field);
       font-family: var(--mono);
       font-size: 12px;
     }}
@@ -1672,27 +2019,60 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       border: 3px solid transparent;
       border-radius: 999px;
       background-clip: padding-box;
-      background-color: rgba(80, 77, 68, 0.24);
+      background-color: rgba(142, 142, 147, 0.32);
     }}
     ::-webkit-scrollbar-track {{ background: transparent; }}
+    @keyframes pulse {{
+      0%, 100% {{ opacity: 0.35; transform: scale(0.9); }}
+      50% {{ opacity: 1; transform: scale(1); }}
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
     @keyframes dots {{
       0% {{ content: ""; }}
       25% {{ content: "."; }}
       50% {{ content: ".."; }}
       75%, 100% {{ content: "..."; }}
     }}
+    @media (max-width: 620px) {{
+      body {{ padding: 10px; }}
+      .prompt-shell {{ flex-direction: column; }}
+      .history-pane {{
+        width: auto;
+        flex: 0 0 auto;
+        max-height: 150px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }}
+      .new-chat {{
+        margin-bottom: 10px;
+      }}
+      .history-list {{
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 4px;
+      }}
+      .history-group {{
+        display: none;
+      }}
+      .history-item {{
+        min-width: 180px;
+        margin-bottom: 0;
+      }}
+      .bubble {{
+        max-width: 96%;
+      }}
+    }}
   </style>
 </head>
 <body>
   <div class="window">
     <header class="window-bar">
-      <div class="traffic" aria-hidden="true">
-        <span class="traffic-dot red"></span>
-        <span class="traffic-dot yellow"></span>
-        <span class="traffic-dot green"></span>
-      </div>
       <h1 class="window-title">TermFix{title_suffix}</h1>
-      <kbd class="shortcut">&#8984;L</kbd>
+      <kbd class="shortcut">{shortcut_label}</kbd>
       <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
     </header>
 
@@ -1701,16 +2081,23 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         <button id="new-chat-button" class="new-chat" type="button">New chat</button>
         <div id="history-list" class="history-list">{history}</div>
       </aside>
-      <section class="chat-pane">
+      <section id="chat-pane" class="chat-pane">
         <div id="content" class="conversation">{body}</div>
         <form id="prompt-form">
           <div id="context-line" class="context-line {context_class}">
             <span class="context-dot" aria-hidden="true"></span>
             <span id="context-label">{context_label}</span>
           </div>
+          <div id="streaming-note" class="streaming-note" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>TermFix is responding</span>
+          </div>
           <div class="input-row">
             <textarea id="prompt-input" placeholder="Ask about this terminal session..." autofocus></textarea>
-            <button id="send-button" type="submit">Send <kbd>&#8984;&#8617;</kbd></button>
+            <div id="input-actions" class="input-actions">
+              <button id="send-button" type="submit">Send <kbd>&#8984;&#8617;</kbd></button>
+              <button id="stop-button" type="button">Stop</button>
+            </div>
           </div>
         </form>
       </section>
@@ -1721,14 +2108,19 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     const stateEndpoint = {state_endpoint};
     const submitEndpoint = {submit_endpoint};
     const newEndpoint = {new_endpoint};
+    const cancelEndpoint = {cancel_endpoint};
     const closeEndpoint = {close_endpoint};
+    const insertEndpoint = {insert_endpoint};
     let activeEntryId = {active_entry_id};
     const popoverSessionId = {popover_session_id};
     const formEl = document.getElementById("prompt-form");
     const promptEl = document.getElementById("prompt-input");
+    const inputActionsEl = document.getElementById("input-actions");
     const sendButton = document.getElementById("send-button");
+    const stopButton = document.getElementById("stop-button");
     const newChatButton = document.getElementById("new-chat-button");
     const historyListEl = document.getElementById("history-list");
+    const chatPaneEl = document.getElementById("chat-pane");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
     const contextLineEl = document.getElementById("context-line");
@@ -1738,8 +2130,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     let closing = false;
     let busy = statusEl.textContent === "streaming";
     let composing = false;
-    promptEl.disabled = busy;
-    sendButton.disabled = busy;
+    setBusy(busy);
 
     function withEntry(url) {{
       let query = "?entry=" + encodeURIComponent(activeEntryId);
@@ -1777,6 +2168,22 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       }}
       statusEl.textContent = status;
       statusEl.className = "status " + status;
+    }}
+
+    function setBusy(isBusy) {{
+      busy = Boolean(isBusy);
+      promptEl.disabled = busy;
+      sendButton.disabled = busy;
+      stopButton.disabled = !busy;
+      inputActionsEl.className = busy ? "input-actions streaming" : "input-actions";
+      sendButton.textContent = busy ? "Sending..." : "Send";
+      if (!busy) {{
+        const shortcut = document.createElement("kbd");
+        shortcut.innerHTML = "&#8984;&#8617;";
+        sendButton.appendChild(shortcut);
+      }}
+      chatPaneEl.classList.toggle("busy", busy);
+      chatPaneEl.setAttribute("aria-busy", busy ? "true" : "false");
     }}
 
     function escapeHtml(text) {{
@@ -1819,9 +2226,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
           contextLineEl.className = "context-line " + data.context_class;
         }}
         setStatus(data.status);
-        busy = data.status === "streaming";
-        promptEl.disabled = busy;
-        sendButton.disabled = busy;
+        setBusy(data.status === "streaming");
         if (busy && !timer) {{
           timer = setInterval(refresh, 350);
         }}
@@ -1842,9 +2247,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       if (!prompt || busy) {{
         return;
       }}
-      busy = true;
-      promptEl.disabled = true;
-      sendButton.disabled = true;
+      setBusy(true);
       setStatus("streaming");
       promptEl.value = "";
 
@@ -1865,9 +2268,29 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       }} catch (error) {{
         setStatus("error");
         contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
-        busy = false;
-        promptEl.disabled = false;
-        sendButton.disabled = false;
+        setBusy(false);
+        promptEl.focus();
+      }}
+    }}
+
+    async function cancelPrompt() {{
+      if (!busy) {{
+        return;
+      }}
+      stopButton.disabled = true;
+      try {{
+        const response = await fetch(withEntry(cancelEndpoint), {{ method: "POST" }});
+        const data = await response.json();
+        if (!data.ok) {{
+          throw new Error(data.error || "Cancel failed.");
+        }}
+        setStatus(data.status || "cancelled");
+        setBusy(false);
+        refresh();
+      }} catch (error) {{
+        setStatus("error");
+        contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
+        setBusy(false);
         promptEl.focus();
       }}
     }}
@@ -1885,6 +2308,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     formEl.addEventListener("submit", (event) => {{
       event.preventDefault();
       submitPrompt();
+    }});
+
+    stopButton.addEventListener("click", () => {{
+      cancelPrompt();
     }});
 
     newChatButton.addEventListener("click", async () => {{
@@ -1940,7 +2367,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
 
     document.addEventListener("keydown", (event) => {{
       if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
-          event.key && event.key.toLowerCase() === "l") {{
+          event.key && event.key.toLowerCase() === {close_key}) {{
         event.preventDefault();
         closePopover();
       }}
@@ -1964,8 +2391,26 @@ def _build_info_html(state: "TermFixState") -> str:
     """Build a small informational popover shown when there is no error yet."""
     base_url = html.escape(state.base_url or DEFAULT_BASE_URL)
     model = html.escape(state.model or DEFAULT_MODEL)
+    max_tokens = html.escape(str(getattr(state, "max_tokens", DEFAULT_MAX_TOKENS)))
+    fix_hotkey = html.escape(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY))
+    prompt_hotkey = html.escape(getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY))
     api_key_error = getattr(state, "api_key_error", "")
     api_key_status = html.escape(api_key_error or ("Configured" if state.api_key else "Missing"))
+    validation_errors = [
+        getattr(state, "base_url_error", ""),
+        getattr(state, "max_tokens_error", ""),
+        getattr(state, "fix_hotkey_error", ""),
+        getattr(state, "prompt_hotkey_error", ""),
+        api_key_error,
+    ]
+    validation_html = "".join(
+        f'<div class="validation-error">{html.escape(error)}</div>'
+        for error in validation_errors
+        if error
+    )
+    close_key = json.dumps(
+        _hotkey_letter(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)).lower()
+    )
     endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": _INFO_POPOVER_ID}))
     close_endpoint = json.dumps(
         _status_endpoint(state, "/closed", {"entry": _INFO_POPOVER_ID})
@@ -1989,6 +2434,11 @@ def _build_info_html(state: "TermFixState") -> str:
     p {{ margin: 0 0 10px 0; color: #3c3c43; }}
     .item {{ margin: 0 0 6px 0; }}
     .label {{ color: #8e8e93; font-weight: 600; }}
+    .validation-error {{
+      margin: 0 0 6px 0;
+      color: #b42318;
+      font-weight: 600;
+    }}
     code {{
       font-family: "Menlo", monospace;
       background: #f2f2f7;
@@ -2003,7 +2453,10 @@ def _build_info_html(state: "TermFixState") -> str:
   <p>Run a command that exits non-zero, then click TermFix again.</p>
   <div class="item"><span class="label">Base URL:</span> <code>{base_url}</code></div>
   <div class="item"><span class="label">Model:</span> <code>{model}</code></div>
+  <div class="item"><span class="label">Max Tokens:</span> <code>{max_tokens}</code></div>
+  <div class="item"><span class="label">Hotkeys:</span> <code>{fix_hotkey}</code> / <code>{prompt_hotkey}</code></div>
   <div class="item"><span class="label">API Key:</span> <code>{api_key_status}</code></div>
+  {validation_html}
   <script>
     const endpoint = {endpoint};
     const closeEndpoint = {close_endpoint};
@@ -2049,7 +2502,7 @@ def _build_info_html(state: "TermFixState") -> str:
 
     document.addEventListener("keydown", (event) => {{
       if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
-          event.key && event.key.toLowerCase() === "j") {{
+          event.key && event.key.toLowerCase() === {close_key}) {{
         event.preventDefault();
         closePopover();
       }}
@@ -2111,9 +2564,15 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     if not isinstance(knobs, dict):
         return
 
-    base_url = knobs.get("base_url", "").strip()
-    if base_url:
+    if "base_url" in knobs:
+        base_url, base_url_error = normalize_base_url(
+            knobs.get("base_url", ""),
+            getattr(state, "base_url", DEFAULT_BASE_URL),
+        )
         state.base_url = base_url
+        state.base_url_error = base_url_error
+        if base_url_error:
+            logger.warning("Ignoring Base URL setting: %s", base_url_error)
 
     api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
     state.api_key = api_key
@@ -2128,6 +2587,38 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
         state.context_lines = normalize_context_lines(ctx_raw)
+
+    if "max_tokens" in knobs:
+        max_tokens, max_tokens_error = normalize_max_tokens(
+            knobs.get("max_tokens", ""),
+            getattr(state, "max_tokens", DEFAULT_MAX_TOKENS),
+        )
+        state.max_tokens = max_tokens
+        state.max_tokens_error = max_tokens_error
+        if max_tokens_error:
+            logger.warning("Ignoring Max Tokens setting: %s", max_tokens_error)
+
+    if "fix_hotkey" in knobs:
+        fix_hotkey, fix_hotkey_error = normalize_command_hotkey(
+            knobs.get("fix_hotkey", ""),
+            getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY),
+            DEFAULT_FIX_HOTKEY,
+        )
+        state.fix_hotkey = fix_hotkey
+        state.fix_hotkey_error = fix_hotkey_error
+        if fix_hotkey_error:
+            logger.warning("Ignoring Fix Hotkey setting: %s", fix_hotkey_error)
+
+    if "prompt_hotkey" in knobs:
+        prompt_hotkey, prompt_hotkey_error = normalize_command_hotkey(
+            knobs.get("prompt_hotkey", ""),
+            getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY),
+            DEFAULT_PROMPT_HOTKEY,
+        )
+        state.prompt_hotkey = prompt_hotkey
+        state.prompt_hotkey_error = prompt_hotkey_error
+        if prompt_hotkey_error:
+            logger.warning("Ignoring Prompt Hotkey setting: %s", prompt_hotkey_error)
 
 
 def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob value.
@@ -2262,6 +2753,44 @@ async def _resolve_live_prompt_session(
     return session, popover_session_id
 
 
+async def _resolve_insert_session(
+    state: "TermFixState",
+    popover_session_id: str = "",
+):
+    """Return a live terminal session for inserting code text."""
+    sessions = getattr(state, "terminal_sessions", {})
+    prompt_sessions = getattr(state, "prompt_sessions", {})
+    if popover_session_id:
+        session = sessions.get(popover_session_id) or prompt_sessions.get(popover_session_id)
+        if session is not None and getattr(session, "session_id", popover_session_id) == popover_session_id:
+            return session, popover_session_id
+
+    connection = getattr(state, "connection", None)
+    if connection is not None and iterm2 is not None:
+        try:
+            app = await iterm2.async_get_app(connection)
+            if popover_session_id:
+                session = app.get_session_by_id(popover_session_id)
+                if session is not None:
+                    sessions[popover_session_id] = session
+                    return session, popover_session_id
+            active_session_id = await _get_active_session_id(app)
+            if active_session_id:
+                session = app.get_session_by_id(active_session_id)
+                if session is not None:
+                    sessions[active_session_id] = session
+                    return session, active_session_id
+        except Exception as exc:
+            logger.debug("Could not resolve live insert session: %s", exc)
+
+    if popover_session_id:
+        session = prompt_sessions.get(popover_session_id)
+        if session is not None and getattr(session, "session_id", popover_session_id) == popover_session_id:
+            return session, popover_session_id
+
+    return None, ""
+
+
 def _prompt_context_label(
     entry: PromptEntry,
     state: "TermFixState",
@@ -2364,13 +2893,20 @@ def _prompt_history_preview(entry: PromptEntry, limit: int = 36) -> str:
 
 def _compact_text(text: str) -> str:
     """Collapse markdown-ish text into a single plain preview line."""
-    cleaned = (
-        text.replace("`", "")
-        .replace("#", "")
-        .replace("*", "")
-        .replace(">", "")
-        .replace("-", " ")
-    )
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        cleaned = re.sub(r"^>+\s*", "", cleaned)
+        cleaned = re.sub(r"^#{1,6}\s*", "", cleaned)
+        cleaned = re.sub(r"^(```+|~~~+)\s*\w*\s*$", "", cleaned)
+        cleaned = re.sub(r"^[-+*]\s+", "", cleaned)
+        cleaned = re.sub(r"^\d+[.)]\s+", "", cleaned)
+        cleaned = cleaned.replace("`", "")
+        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"__(.*?)__", r"\1", cleaned)
+        if cleaned:
+            cleaned_lines.append(cleaned)
+    cleaned = " ".join(cleaned_lines)
     return " ".join(cleaned.split())
 
 
@@ -2380,7 +2916,11 @@ def _truncate_text(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "..."
 
 
-def _conversation_to_html(messages: list[dict], current_response: str = "") -> str:
+def _conversation_to_html(
+    messages: list[dict],
+    current_response: str = "",
+    context: Optional[dict] = None,
+) -> str:
     """Render a prompt conversation transcript."""
     blocks: list[str] = []
 
@@ -2415,27 +2955,70 @@ def _conversation_to_html(messages: list[dict], current_response: str = "") -> s
     if blocks:
         return "\n".join(blocks)
 
-    return """\
+    starters = _prompt_starters(context or {})
+    starter_buttons = "\n".join(
+        '<button class="starter" type="button" data-prompt="'
+        f'{html.escape(prompt, quote=True)}">'
+        '<span class="starter-arrow">&rsaquo;</span>'
+        f"<span>{html.escape(label)}</span>"
+        "</button>"
+        for label, prompt in starters
+    )
+
+    return f"""\
 <div class="empty-state">
   <div class="terminal-glyph">$_</div>
   <h2>Stuck on a command?</h2>
-  <p>Ask about the last error, or paste a command for help.</p>
+  <p>{html.escape(_prompt_empty_state_summary(context or {}))}</p>
   <div class="starter-list">
-    <button class="starter" type="button" data-prompt="Why did this command fail?">
-      <span class="starter-arrow">&rsaquo;</span>
-      <span>Why did this command fail?</span>
-    </button>
-    <button class="starter" type="button" data-prompt="Explain the last output">
-      <span class="starter-arrow">&rsaquo;</span>
-      <span>Explain the last output</span>
-    </button>
-    <button class="starter" type="button" data-prompt="Suggest a fix for this error">
-      <span class="starter-arrow">&rsaquo;</span>
-      <span>Suggest a fix for this error</span>
-    </button>
+    {starter_buttons}
   </div>
   <div class="tip">Tip &middot; Press <kbd>&#8984;L</kbd> anywhere in the terminal</div>
 </div>"""
+
+
+def _prompt_empty_state_summary(context: dict) -> str:
+    hint = _prompt_context_hint(context)
+    if hint:
+        return f"Ask about the recent terminal context, including: {hint}"
+    return "Ask about the last output, or paste a command for help."
+
+
+def _prompt_starters(context: dict) -> list[tuple[str, str]]:
+    hint = _prompt_context_hint(context)
+    if hint:
+        return [
+            (
+                "Explain the recent output",
+                "Explain the recent terminal output and what I should do next.",
+            ),
+            (
+                "Find likely failures",
+                "Find likely errors or risky steps in the recent terminal context.",
+            ),
+            (
+                "Suggest next command",
+                "Suggest the safest next command based on the recent terminal context.",
+            ),
+        ]
+    return [
+        ("Explain the last output", "Explain the last output"),
+        ("Suggest a fix", "Suggest a fix for this error"),
+        ("Draft a safe command", "Draft a safe terminal command for what I describe next."),
+    ]
+
+
+def _prompt_context_hint(context: dict, limit: int = 76) -> str:
+    command = str((context or {}).get("command") or "").strip()
+    if command:
+        return _truncate_text(command, limit)
+
+    output = str((context or {}).get("terminal_output") or "")
+    for line in reversed(output.splitlines()):
+        compact = _compact_text(line)
+        if compact:
+            return _truncate_text(compact, limit)
+    return ""
 
 
 def _plain_text_to_html(text: str) -> str:
@@ -2449,6 +3032,7 @@ def _markdown_to_html(markdown: str) -> str:
     blocks: list[str] = []
     paragraph: list[str] = []
     list_items: list[str] = []
+    list_tag: Optional[str] = None
     in_code = False
     code_lines: list[str] = []
 
@@ -2459,16 +3043,28 @@ def _markdown_to_html(markdown: str) -> str:
             paragraph = []
 
     def flush_list() -> None:
-        nonlocal list_items
+        nonlocal list_items, list_tag
         if list_items:
-            blocks.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
+            tag = list_tag or "ul"
+            blocks.append(f"<{tag}>" + "".join(f"<li>{item}</li>" for item in list_items) + f"</{tag}>")
             list_items = []
+            list_tag = None
+
+    def append_list_item(tag: str, item: str) -> None:
+        nonlocal list_tag
+        if list_tag is not None and list_tag != tag:
+            flush_list()
+        list_tag = tag
+        list_items.append(item)
 
     def code_block_html(lines: list[str]) -> str:
         code = html.escape("\n".join(lines))
         return (
             '<div class="code-block">'
-            '<button class="copy-code" type="button" data-copy-code>Copy</button>'
+            '<div class="code-actions">'
+            '<button class="code-action copy-code" type="button" data-copy-code>Copy</button>'
+            '<button class="code-action insert-code" type="button" data-insert-code>Insert</button>'
+            "</div>"
             f"<pre><code>{code}</code></pre>"
             "</div>"
         )
@@ -2510,8 +3106,12 @@ def _markdown_to_html(markdown: str) -> str:
             blocks.append(f"<h1>{html.escape(stripped[2:].strip())}</h1>")
         elif stripped.startswith(("- ", "* ")):
             flush_paragraph()
-            list_items.append(_inline_markdown(stripped[2:].strip()))
+            append_list_item("ul", _inline_markdown(stripped[2:].strip()))
+        elif re.match(r"^\d+[.)]\s+", stripped):
+            flush_paragraph()
+            append_list_item("ol", _inline_markdown(re.sub(r"^\d+[.)]\s+", "", stripped).strip()))
         else:
+            flush_list()
             paragraph.append(stripped)
 
     if in_code:

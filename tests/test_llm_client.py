@@ -166,6 +166,28 @@ def test_post_chat_completion_does_not_retry_auth_error(monkeypatch):
     assert delays == []
 
 
+def test_post_chat_completion_uses_configured_max_tokens(monkeypatch):
+    captured_payload = {}
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal captured_payload
+        captured_payload = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse({"choices": [{"message": {"content": "fixed"}}]})
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+
+    result = _post_chat_completion(
+        "key",
+        "https://api.example.test",
+        "model",
+        "help",
+        max_tokens=4096,
+    )
+
+    assert result == "fixed"
+    assert captured_payload["max_tokens"] == 4096
+
+
 def test_post_chat_completion_stream_retries_transient_status(monkeypatch):
     calls = 0
     delays = []
@@ -193,3 +215,32 @@ def test_post_chat_completion_stream_retries_transient_status(monkeypatch):
     assert snapshots == ["hello", "hello world"]
     assert calls == 2
     assert delays == [1.0]
+
+
+def test_post_chat_completion_stream_uses_configured_max_tokens(monkeypatch):
+    captured_payload = {}
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal captured_payload
+        captured_payload = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            lines=[
+                b'data: {"choices":[{"delta":{"content":"hello"}}]}\n',
+                b"data: [DONE]\n",
+            ]
+        )
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+
+    snapshots = list(
+        _post_chat_completion_stream(
+            "key",
+            "https://api.example.test",
+            "model",
+            "help",
+            max_tokens=8192,
+        )
+    )
+
+    assert snapshots == ["hello"]
+    assert captured_payload["max_tokens"] == 8192

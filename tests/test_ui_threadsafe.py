@@ -265,5 +265,52 @@ class StateLoopThreadsafeTests(unittest.TestCase):
             asyncio.run(_register())
 
 
+class HotkeyConfigTests(unittest.TestCase):
+    def test_termfix_hotkey_kind_uses_configured_state_hotkeys(self) -> None:
+        class _Modifier:
+            COMMAND = "command"
+            CONTROL = "control"
+            OPTION = "option"
+            SHIFT = "shift"
+
+        class _Keycode:
+            ANSI_J = "j"
+            ANSI_K = "k"
+            ANSI_L = "l"
+            ANSI_P = "p"
+
+        class _Keystroke:
+            class Action:
+                NA = "na"
+                KEY_DOWN = "key_down"
+
+        fake_iterm2 = SimpleNamespace(
+            Modifier=_Modifier,
+            Keycode=_Keycode,
+            Keystroke=_Keystroke,
+        )
+        state = SimpleNamespace(fix_hotkey="Cmd+K", prompt_hotkey="Cmd+P")
+        keypress = SimpleNamespace(
+            action=_Keystroke.Action.KEY_DOWN,
+            modifiers=[_Modifier.COMMAND],
+            keycode=_Keycode.ANSI_K,
+        )
+        prompt_keypress = SimpleNamespace(
+            action=_Keystroke.Action.KEY_DOWN,
+            modifiers=[_Modifier.COMMAND],
+            keycode=_Keycode.ANSI_P,
+        )
+        default_keypress = SimpleNamespace(
+            action=_Keystroke.Action.KEY_DOWN,
+            modifiers=[_Modifier.COMMAND],
+            keycode=_Keycode.ANSI_J,
+        )
+
+        with mock.patch.object(ui, "iterm2", fake_iterm2):
+            self.assertEqual(ui._termfix_hotkey_kind(keypress, state), "fix")
+            self.assertEqual(ui._termfix_hotkey_kind(prompt_keypress, state), "prompt")
+            self.assertIsNone(ui._termfix_hotkey_kind(default_keypress, state))
+
+
 if __name__ == "__main__":
     unittest.main()
