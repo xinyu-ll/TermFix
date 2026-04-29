@@ -78,7 +78,7 @@ def test_sync_knobs_updates_settings_and_parses_context_lines():
         state,
         {
             "base_url": " https://api.example.com ",
-            "api_key": " sk-test extra-token ",
+            "api_key": " sk-test \n",
             "model": " model-x ",
             "context_lines": "8",
         },
@@ -88,6 +88,16 @@ def test_sync_knobs_updates_settings_and_parses_context_lines():
     assert state.api_key == "sk-test"
     assert state.model == "model-x"
     assert state.context_lines == 8
+
+    _sync_knobs(state, {"api_key": " sk-test extra-token "})
+
+    assert state.api_key == ""
+    assert state.api_key_error == "API key contains internal whitespace; paste only the key."
+
+    _sync_knobs(state, {"api_key": "API Key: sk-test"})
+
+    assert state.api_key == ""
+    assert state.api_key_error == "Remove label text such as 'API Key:' and paste only the key."
 
     _sync_knobs(state, {"context_lines": "not-a-number"})
 

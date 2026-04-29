@@ -1,16 +1,53 @@
+from __future__ import annotations
+
 import asyncio
 import contextvars
+import io
+import json
 import threading
+import urllib.error
 
 import pytest
 
+from termfixlib import llm_client
 from termfixlib.llm_client import (
+    ApiError,
     _build_chat_messages,
     _chat_completions_url,
     _clean_markdown,
+    _post_chat_completion,
+    _post_chat_completion_stream,
     _remove_prefix,
     _run_blocking_in_thread,
 )
+
+
+class _FakeResponse:
+    def __init__(self, body: dict | None = None, lines: list[bytes] | None = None) -> None:
+        self.body = body or {}
+        self.lines = lines or []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.body).encode("utf-8")
+
+    def __iter__(self):
+        return iter(self.lines)
+
+
+def _http_error(status_code: int, message: str = "try again") -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://example.test/chat/completions",
+        status_code,
+        "status",
+        {},
+        io.BytesIO(json.dumps({"error": {"message": message}}).encode("utf-8")),
+    )
 
 
 @pytest.mark.parametrize(
@@ -86,3 +123,73 @@ def test_run_blocking_in_thread_runs_callable_with_context_and_kwargs():
 
     assert worker_thread != caller_thread
     assert result == "value:ctx-123:done"
+
+
+def test_post_chat_completion_retries_transient_network_error(monkeypatch):
+    calls = 0
+    delays = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.URLError("temporary dns failure")
+        return _FakeResponse({"choices": [{"message": {"content": "fixed"}}]})
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(llm_client, "_sleep_before_retry", delays.append)
+
+    result = _post_chat_completion("key", "https://api.example.test", "model", "help")
+
+    assert result == "fixed"
+    assert calls == 2
+    assert delays == [1.0]
+
+
+def test_post_chat_completion_does_not_retry_auth_error(monkeypatch):
+    calls = 0
+    delays = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        raise _http_error(401, "bad key")
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(llm_client, "_sleep_before_retry", delays.append)
+
+    with pytest.raises(ApiError) as exc_info:
+        _post_chat_completion("key", "https://api.example.test", "model", "help")
+
+    assert exc_info.value.status_code == 401
+    assert calls == 1
+    assert delays == []
+
+
+def test_post_chat_completion_stream_retries_transient_status(monkeypatch):
+    calls = 0
+    delays = []
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(503, "overloaded")
+        return _FakeResponse(
+            lines=[
+                b'data: {"choices":[{"delta":{"content":"hello"}}]}\n',
+                b'data: {"choices":[{"delta":{"content":" world"}}]}\n',
+                b"data: [DONE]\n",
+            ]
+        )
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+    monkeypatch.setattr(llm_client, "_sleep_before_retry", delays.append)
+
+    snapshots = list(
+        _post_chat_completion_stream("key", "https://api.example.test", "model", "help")
+    )
+
+    assert snapshots == ["hello", "hello world"]
+    assert calls == 2
+    assert delays == [1.0]

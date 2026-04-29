@@ -61,6 +61,7 @@ def _install_iterm2_stub() -> None:
 _install_iterm2_stub()
 
 from termfixlib import ui  # noqa: E402
+from termfixlib.monitor import TermFixState  # noqa: E402
 
 
 class StateLoopThreadsafeTests(unittest.TestCase):
@@ -157,6 +158,111 @@ class StateLoopThreadsafeTests(unittest.TestCase):
             result,
         )
         self.assertEqual([True], closed)
+
+    def test_analysis_task_start_mutates_task_dict_on_state_loop(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.addCleanup(asyncio.set_event_loop, None)
+        self.addCleanup(loop.close)
+
+        state = SimpleNamespace(
+            loop=loop,
+            analysis_tasks={},
+            refresh_analyzing=lambda: None,
+        )
+        entry = SimpleNamespace(
+            id="entry-12345678",
+            analysis_started=False,
+            status="pending",
+            result=None,
+            updated_at=0,
+        )
+
+        async def _run_once(_entry, _state):  # noqa: ANN001
+            return None
+
+        with mock.patch.object(
+            ui,
+            "_run_streaming_analysis",
+            side_effect=_run_once,
+        ), mock.patch.object(
+            loop,
+            "call_soon_threadsafe",
+            wraps=loop.call_soon_threadsafe,
+        ) as call_soon_threadsafe:
+            ui._start_analysis_task(entry, state)
+            self.assertEqual({}, state.analysis_tasks)
+            loop.run_until_complete(asyncio.sleep(0))
+            loop.run_until_complete(asyncio.sleep(0))
+
+        call_soon_threadsafe.assert_called_once()
+        self.assertTrue(entry.analysis_started)
+        self.assertIn(entry.id, state.analysis_tasks)
+        self.assertTrue(state.analysis_tasks[entry.id].done())
+
+    def test_status_bar_registration_uses_finite_timeout(self) -> None:
+        recorded = {}
+
+        class _StringKnob:
+            def __init__(self, **kwargs):  # noqa: ANN003
+                self.kwargs = kwargs
+
+        class _StatusBarComponent:
+            def __init__(self, **kwargs):  # noqa: ANN003
+                self.kwargs = kwargs
+
+            async def async_register(self, connection, status_coro, timeout, onclick):  # noqa: ANN001
+                recorded["timeout"] = timeout
+
+        fake_iterm2 = SimpleNamespace(
+            StringKnob=_StringKnob,
+            StatusBarComponent=_StatusBarComponent,
+            StatusBarRPC=lambda func: func,
+            RPC=lambda func: func,
+        )
+
+        async def _register():
+            with mock.patch.object(ui, "iterm2", fake_iterm2), mock.patch.object(
+                ui,
+                "_ensure_status_server",
+                return_value=None,
+            ):
+                return await ui.register_status_bar(object(), object())
+
+        state = asyncio.run(_register())
+
+        self.assertIsInstance(state, TermFixState)
+        self.assertEqual(ui._STATUS_REGISTER_TIMEOUT, recorded["timeout"])
+
+    def test_status_bar_registration_timeout_has_clear_error(self) -> None:
+        class _StringKnob:
+            def __init__(self, **kwargs):  # noqa: ANN003
+                self.kwargs = kwargs
+
+        class _StatusBarComponent:
+            def __init__(self, **kwargs):  # noqa: ANN003
+                self.kwargs = kwargs
+
+            async def async_register(self, connection, status_coro, timeout, onclick):  # noqa: ANN001
+                raise asyncio.TimeoutError()
+
+        fake_iterm2 = SimpleNamespace(
+            StringKnob=_StringKnob,
+            StatusBarComponent=_StatusBarComponent,
+            StatusBarRPC=lambda func: func,
+            RPC=lambda func: func,
+        )
+
+        async def _register():
+            with mock.patch.object(ui, "iterm2", fake_iterm2), mock.patch.object(
+                ui,
+                "_ensure_status_server",
+                return_value=None,
+            ):
+                return await ui.register_status_bar(object(), object())
+
+        with self.assertRaisesRegex(RuntimeError, "registration timed out"):
+            asyncio.run(_register())
 
 
 if __name__ == "__main__":

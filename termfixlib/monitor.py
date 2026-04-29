@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -142,6 +143,7 @@ class TermFixState:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
+        self._state_lock = threading.RLock()
         self.errors: list[ErrorEntry] = []
         self.prompts: list[PromptEntry] = self._load_prompt_history()
 
@@ -164,12 +166,14 @@ class TermFixState:
 
     async def add_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
-            self.errors.append(entry)
-            self._prune_error_history()
+            with self._state_lock:
+                self.errors.append(entry)
+                self._prune_error_history()
 
     async def remove_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
-            self._discard_error(entry)
+            with self._state_lock:
+                self._discard_error(entry)
 
     async def add_prompt(self, entry: PromptEntry) -> None:
         async with self._lock:
@@ -182,78 +186,86 @@ class TermFixState:
 
     @property
     def unhandled_error_count(self) -> int:
-        return sum(1 for entry in self.errors if not entry.handled)
+        with self._state_lock:
+            return sum(1 for entry in self.errors if not entry.handled)
 
     @property
     def total_error_count(self) -> int:
-        return len(self.errors)
+        with self._state_lock:
+            return len(self.errors)
 
     def latest_error(self) -> Optional[ErrorEntry]:
-        return self.errors[-1] if self.errors else None
+        with self._state_lock:
+            return self.errors[-1] if self.errors else None
 
     def latest_unhandled_error(self, session_id: Optional[str] = None) -> Optional[ErrorEntry]:
-        for entry in reversed(self.errors):
-            if entry.handled:
-                continue
-            if session_id is not None and entry.session_id != session_id:
-                continue
-            return entry
-        return None
-
-    def get_error(self, entry_id: str) -> Optional[ErrorEntry]:
-        for entry in self.errors:
-            if entry.id == entry_id:
+        with self._state_lock:
+            for entry in reversed(self.errors):
+                if entry.handled:
+                    continue
+                if session_id is not None and entry.session_id != session_id:
+                    continue
                 return entry
         return None
 
+    def get_error(self, entry_id: str) -> Optional[ErrorEntry]:
+        with self._state_lock:
+            for entry in self.errors:
+                if entry.id == entry_id:
+                    return entry
+        return None
+
     def mark_error_handled(self, entry_id: str) -> bool:
-        entry = self.get_error(entry_id)
-        if entry is None or entry.handled:
-            return False
-        handled_at = time.time()
-        entry.handled = True
-        entry.handled_at = handled_at
-        entry.updated_at = handled_at
-        self._prune_error_history()
-        return True
+        with self._state_lock:
+            entry = self.get_error(entry_id)
+            if entry is None or entry.handled:
+                return False
+            handled_at = time.time()
+            entry.handled = True
+            entry.handled_at = handled_at
+            entry.updated_at = handled_at
+            self._prune_error_history()
+            return True
 
     def _prune_error_history(self) -> None:
         """Bound captured errors, pruning handled history before live failures."""
-        handled_limit = max(0, int(HANDLED_ERROR_RETENTION_LIMIT))
-        handled_entries = [entry for entry in self.errors if entry.handled]
-        handled_overflow = len(handled_entries) - handled_limit
-        if handled_overflow > 0:
-            for entry in handled_entries[:handled_overflow]:
+        with self._state_lock:
+            handled_limit = max(0, int(HANDLED_ERROR_RETENTION_LIMIT))
+            handled_entries = [entry for entry in self.errors if entry.handled]
+            handled_overflow = len(handled_entries) - handled_limit
+            if handled_overflow > 0:
+                for entry in handled_entries[:handled_overflow]:
+                    self._discard_error(entry)
+
+            total_limit = max(0, int(ERROR_RETENTION_LIMIT))
+            total_overflow = len(self.errors) - total_limit
+            if total_overflow <= 0:
+                return
+
+            for entry in list(self.errors):
+                if total_overflow <= 0:
+                    break
+                if not entry.handled:
+                    continue
+                if self._discard_error(entry):
+                    total_overflow -= 1
+
+            total_overflow = len(self.errors) - total_limit
+            if total_overflow <= 0:
+                return
+
+            for entry in list(self.errors)[:total_overflow]:
                 self._discard_error(entry)
 
-        total_limit = max(0, int(ERROR_RETENTION_LIMIT))
-        total_overflow = len(self.errors) - total_limit
-        if total_overflow <= 0:
-            return
-
-        for entry in list(self.errors):
-            if total_overflow <= 0:
-                break
-            if not entry.handled:
-                continue
-            if self._discard_error(entry):
-                total_overflow -= 1
-
-        total_overflow = len(self.errors) - total_limit
-        if total_overflow <= 0:
-            return
-
-        for entry in list(self.errors)[:total_overflow]:
-            self._discard_error(entry)
-
     def _discard_error(self, entry: ErrorEntry) -> bool:
-        try:
-            self.errors.remove(entry)
-        except ValueError:
-            return False
-        self.popover_last_seen.pop(entry.id, None)
-        self.popover_close_requests.discard(entry.id)
-        return True
+        with self._state_lock:
+            try:
+                self.errors.remove(entry)
+            except ValueError:
+                return False
+            self.popover_last_seen.pop(entry.id, None)
+            self.popover_close_requests.discard(entry.id)
+            return True
 
     def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
         for entry in reversed(self.prompts):
@@ -271,9 +283,10 @@ class TermFixState:
         return None
 
     def refresh_analyzing(self) -> None:
-        self.analyzing = any(entry.status == "streaming" for entry in self.errors) or any(
-            entry.status == "streaming" for entry in self.prompts
-        )
+        with self._state_lock:
+            self.analyzing = any(entry.status == "streaming" for entry in self.errors) or any(
+                entry.status == "streaming" for entry in self.prompts
+            )
 
     def save_prompt_history(self) -> None:
         """Persist prompt conversations to a fixed on-disk JSON file."""
@@ -354,24 +367,29 @@ class TermFixState:
         self.prompts = self.prompts[-PROMPT_HISTORY_LIMIT:]
 
     def mark_popover_seen(self, entry_id: str) -> None:
-        self.popover_last_seen[entry_id] = time.time()
+        with self._state_lock:
+            self.popover_last_seen[entry_id] = time.time()
 
     def is_popover_open(self, entry_id: str, ttl: float = 1.5) -> bool:
-        last_seen = self.popover_last_seen.get(entry_id, 0)
+        with self._state_lock:
+            last_seen = self.popover_last_seen.get(entry_id, 0)
         return time.time() - last_seen < ttl
 
     def request_popover_close(self, entry_id: str) -> None:
-        self.popover_close_requests.add(entry_id)
+        with self._state_lock:
+            self.popover_close_requests.add(entry_id)
 
     def consume_popover_close_request(self, entry_id: str) -> bool:
-        if entry_id not in self.popover_close_requests:
-            return False
-        self.popover_close_requests.remove(entry_id)
-        return True
+        with self._state_lock:
+            if entry_id not in self.popover_close_requests:
+                return False
+            self.popover_close_requests.discard(entry_id)
+            return True
 
     def mark_popover_closed(self, entry_id: str) -> None:
-        self.popover_last_seen.pop(entry_id, None)
-        self.popover_close_requests.discard(entry_id)
+        with self._state_lock:
+            self.popover_last_seen.pop(entry_id, None)
+            self.popover_close_requests.discard(entry_id)
 
     async def notify_ui_update(self) -> None:
         """Ask the status bar component to re-render and update the badge."""

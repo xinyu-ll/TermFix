@@ -150,6 +150,58 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertIs(state.get_error(pending.id), pending)
         self.assertEqual(state.unhandled_error_count, 0)
 
+    def test_mark_error_handled_is_thread_safe(self):
+        state = TermFixState()
+        pending = _entry("session-a", "pending")
+        state.errors.append(pending)
+        started = threading.Barrier(12)
+        results = []
+        exceptions = []
+
+        def mark_handled() -> None:
+            try:
+                started.wait(timeout=1)
+                results.append(state.mark_error_handled(pending.id))
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                exceptions.append(exc)
+
+        threads = [threading.Thread(target=mark_handled) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        self.assertEqual([], exceptions)
+        self.assertEqual(1, results.count(True))
+        self.assertEqual(11, results.count(False))
+        self.assertTrue(pending.handled)
+
+    def test_popover_close_request_is_consumed_once_across_threads(self):
+        state = TermFixState()
+        entry_id = "entry-1"
+        state.request_popover_close(entry_id)
+        started = threading.Barrier(12)
+        results = []
+        exceptions = []
+
+        def consume_request() -> None:
+            try:
+                started.wait(timeout=1)
+                results.append(state.consume_popover_close_request(entry_id))
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                exceptions.append(exc)
+
+        threads = [threading.Thread(target=consume_request) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=1)
+
+        self.assertEqual([], exceptions)
+        self.assertEqual(1, results.count(True))
+        self.assertEqual(11, results.count(False))
+        self.assertNotIn(entry_id, state.popover_close_requests)
+
     def test_picker_ignores_handled_entries_and_prefers_clicked_session(self):
         state = TermFixState()
         state.errors.extend(

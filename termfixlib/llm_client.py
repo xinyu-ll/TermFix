@@ -8,8 +8,10 @@ import functools
 import json
 import logging
 import os
+import socket
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -36,6 +38,16 @@ Could not contact the API.
 
 _USER_AGENT = "TermFix/1.0"
 _MACOS_CA_FILE = "/private/etc/ssl/cert.pem"
+_TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
+_TRANSIENT_HTTP_STATUS_CODES = {429, 503}
+_TRANSIENT_NETWORK_ERRORS = (
+    urllib.error.URLError,
+    ConnectionError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    socket.timeout,
+)
 
 
 async def _run_blocking_in_thread(
@@ -281,12 +293,24 @@ def _post_chat_completion(
         method="POST",
     )
 
-    try:
-        with _urlopen(request, timeout=45) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(exc.code, _extract_error_message(body)) from exc
+    attempt = 0
+    while True:
+        try:
+            with _urlopen(request, timeout=45) as response:
+                body = response.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            api_error = ApiError(exc.code, _extract_error_message(body))
+            if _retry_transient_failure(api_error, attempt, "LLM request"):
+                attempt += 1
+                continue
+            raise api_error from exc
+        except _TRANSIENT_NETWORK_ERRORS as exc:
+            if _retry_transient_failure(exc, attempt, "LLM request"):
+                attempt += 1
+                continue
+            raise
 
     try:
         parsed = json.loads(body)
@@ -323,41 +347,79 @@ def _post_chat_completion_stream(
         method="POST",
     )
 
-    content_parts: list[str] = []
-    yielded = False
+    attempt = 0
+    while True:
+        content_parts: list[str] = []
+        yielded = False
 
-    try:
-        with _urlopen(request, timeout=60) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if not line.startswith("data:"):
-                    continue
+        try:
+            with _urlopen(request, timeout=60) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
 
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
 
-                try:
-                    parsed = json.loads(data)
-                except json.JSONDecodeError:
-                    logger.debug("Ignoring invalid SSE chunk: %r", data[:200])
-                    continue
+                    try:
+                        parsed = json.loads(data)
+                    except json.JSONDecodeError:
+                        logger.debug("Ignoring invalid SSE chunk: %r", data[:200])
+                        continue
 
-                choice = parsed.get("choices", [{}])[0]
-                delta = choice.get("delta") or choice.get("message") or {}
-                piece = _extract_content(delta.get("content"))
-                if piece:
-                    content_parts.append(piece)
-                    yielded = True
-                    yield "".join(content_parts)
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise ApiError(exc.code, _extract_error_message(body)) from exc
+                    choice = parsed.get("choices", [{}])[0]
+                    delta = choice.get("delta") or choice.get("message") or {}
+                    piece = _extract_content(delta.get("content"))
+                    if piece:
+                        content_parts.append(piece)
+                        yielded = True
+                        yield "".join(content_parts)
+            if not yielded:
+                raise ApiError(502, "Provider streaming response did not include content.")
+            return
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            api_error = ApiError(exc.code, _extract_error_message(body))
+            if not yielded and _retry_transient_failure(api_error, attempt, "LLM stream"):
+                attempt += 1
+                continue
+            raise api_error from exc
+        except _TRANSIENT_NETWORK_ERRORS as exc:
+            if not yielded and _retry_transient_failure(exc, attempt, "LLM stream"):
+                attempt += 1
+                continue
+            raise
 
-    if not yielded:
-        raise ApiError(502, "Provider streaming response did not include content.")
+
+def _retry_transient_failure(exc: BaseException, attempt: int, operation: str) -> bool:
+    """Sleep before retrying provider failures that are commonly transient."""
+    if attempt >= len(_TRANSIENT_RETRY_DELAYS):
+        return False
+    if isinstance(exc, ApiError):
+        if exc.status_code not in _TRANSIENT_HTTP_STATUS_CODES:
+            return False
+    elif not isinstance(exc, _TRANSIENT_NETWORK_ERRORS):
+        return False
+
+    delay = _TRANSIENT_RETRY_DELAYS[attempt]
+    logger.warning(
+        "%s failed transiently on attempt %d/%d; retrying in %.1fs: %s",
+        operation,
+        attempt + 1,
+        len(_TRANSIENT_RETRY_DELAYS) + 1,
+        delay,
+        exc,
+    )
+    _sleep_before_retry(delay)
+    return True
+
+
+def _sleep_before_retry(delay: float) -> None:
+    time.sleep(delay)
 
 
 def _build_chat_messages(

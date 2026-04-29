@@ -13,6 +13,7 @@ import html
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -48,8 +49,13 @@ logger = logging.getLogger(__name__)
 _INFO_POPOVER_ID = "__info__"
 _PROMPT_POPOVER_ID = "__prompt__"
 _STATE_LOOP_CALL_TIMEOUT = 2
+_STATUS_REGISTER_TIMEOUT = 10
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset({"/closed", "/prompt/new", "/prompt", "/state"})
+_API_KEY_LABEL_RE = re.compile(
+    r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|bearer|token)\s*[:=]",
+    re.IGNORECASE,
+)
 _CODE_BLOCK_COPY_CSS = """\
     .code-block {
       position: relative;
@@ -218,12 +224,20 @@ async def register_status_bar(
             name="termfix-click",
         )
 
-    await component.async_register(
-        connection,
-        _status_coro,
-        timeout=None,
-        onclick=_on_click,
-    )
+    try:
+        await component.async_register(
+            connection,
+            _status_coro,
+            timeout=_STATUS_REGISTER_TIMEOUT,
+            onclick=_on_click,
+        )
+    except asyncio.TimeoutError as exc:
+        message = (
+            "TermFix status bar registration timed out. "
+            "Reload the iTerm2 Python API script and try again."
+        )
+        logger.error(message)
+        raise RuntimeError(message) from exc
 
     logger.info("TermFix status bar component registered (%s)", STATUS_IDENTIFIER)
     return state
@@ -367,6 +381,11 @@ def _attach_prompt_history_to_session(
 
 def _start_analysis_task(entry, state: "TermFixState") -> None:
     """Launch one streaming analysis task for an entry."""
+    _schedule_state_loop_callback(state, _start_analysis_task_on_loop, entry, state)
+
+
+def _start_analysis_task_on_loop(entry, state: "TermFixState") -> None:
+    """Launch one streaming analysis task for an entry on the state event loop."""
     if entry.id in state.analysis_tasks:
         return
 
@@ -385,6 +404,11 @@ def _start_analysis_task(entry, state: "TermFixState") -> None:
 
 def _start_prompt_analysis_task(entry: PromptEntry, state: "TermFixState") -> None:
     """Launch one streaming user-prompt task."""
+    _schedule_state_loop_callback(state, _start_prompt_analysis_task_on_loop, entry, state)
+
+
+def _start_prompt_analysis_task_on_loop(entry: PromptEntry, state: "TermFixState") -> None:
+    """Launch one streaming user-prompt task on the state event loop."""
     if entry.id in state.analysis_tasks:
         return
 
@@ -399,6 +423,34 @@ def _start_prompt_analysis_task(entry: PromptEntry, state: "TermFixState") -> No
         name=f"termfix-prompt-{entry.id[:8]}",
     )
     state.analysis_tasks[entry.id] = task
+
+
+def _schedule_state_loop_callback(
+    state: "TermFixState",
+    callback: Callable[..., None],
+    *args,
+) -> bool:
+    """Schedule a state mutation callback on the owning asyncio loop."""
+    loop = state.loop
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.error("Cannot schedule TermFix state update; event loop is unavailable.")
+            return False
+        state.loop = loop
+    try:
+        if asyncio.get_running_loop() is loop:
+            callback(*args)
+            return True
+    except RuntimeError:
+        pass
+    try:
+        loop.call_soon_threadsafe(callback, *args)
+    except RuntimeError as exc:
+        logger.error("Cannot schedule TermFix state update: %s", exc)
+        return False
+    return True
 
 
 async def _run_streaming_analysis(entry, state: "TermFixState") -> None:
@@ -884,14 +936,14 @@ async def _submit_prompt_entry(
     if entry.status == "streaming":
         return {"ok": False, "error": "Prompt is already running."}
 
-    if _is_detached_prompt(entry) and not _resume_prompt_in_session(
+    if _is_detached_prompt(entry) and not await _resume_prompt_in_session(
         entry,
         state,
         popover_session_id,
     ):
         return {
             "ok": False,
-            "error": "Current terminal session is unavailable. Reopen Cmd+L and try again.",
+            "error": "Current terminal session is unavailable or closed. Reopen Cmd+L and try again.",
         }
     entry.user_prompt = prompt
     entry.messages.append({"role": "user", "content": prompt})
@@ -1912,7 +1964,8 @@ def _build_info_html(state: "TermFixState") -> str:
     """Build a small informational popover shown when there is no error yet."""
     base_url = html.escape(state.base_url or DEFAULT_BASE_URL)
     model = html.escape(state.model or DEFAULT_MODEL)
-    api_key_status = "Configured" if state.api_key else "Missing"
+    api_key_error = getattr(state, "api_key_error", "")
+    api_key_status = html.escape(api_key_error or ("Configured" if state.api_key else "Missing"))
     endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": _INFO_POPOVER_ID}))
     close_endpoint = json.dumps(
         _status_endpoint(state, "/closed", {"entry": _INFO_POPOVER_ID})
@@ -2062,8 +2115,11 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     if base_url:
         state.base_url = base_url
 
-    api_key_raw = knobs.get("api_key", "").strip()
-    state.api_key = api_key_raw.split()[0] if api_key_raw else ""
+    api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
+    state.api_key = api_key
+    state.api_key_error = api_key_error
+    if api_key_error:
+        logger.warning("Ignoring API key setting: %s", api_key_error)
 
     model = knobs.get("model", "").strip()
     if model:
@@ -2072,6 +2128,18 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     ctx_raw = knobs.get("context_lines", "").strip()
     if ctx_raw.isdigit():
         state.context_lines = normalize_context_lines(ctx_raw)
+
+
+def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob value.
+    """Return a stripped API key or a user-readable validation error."""
+    api_key = str(value or "").strip()
+    if not api_key:
+        return "", ""
+    if _API_KEY_LABEL_RE.search(api_key):
+        return "", "Remove label text such as 'API Key:' and paste only the key."
+    if any(char.isspace() for char in api_key):
+        return "", "API key contains internal whitespace; paste only the key."
+    return api_key, ""
 
 
 def _prompt_history_to_html(
@@ -2126,7 +2194,7 @@ def _is_detached_prompt(entry: PromptEntry) -> bool:
     return bool(entry.messages and not entry.session_id)
 
 
-def _resume_prompt_in_session(
+async def _resume_prompt_in_session(
     entry: PromptEntry,
     state: "TermFixState",
     popover_session_id: str,
@@ -2137,15 +2205,61 @@ def _resume_prompt_in_session(
     if not popover_session_id:
         return False
 
-    session = state.prompt_sessions.get(popover_session_id)
+    session, session_id = await _resolve_live_prompt_session(state, popover_session_id)
     if session is None:
         return False
 
-    entry.session_id = popover_session_id
+    entry.session_id = session_id
     entry.session = session
     entry.restored = False
     entry.context = {}
     return True
+
+
+async def _resolve_live_prompt_session(
+    state: "TermFixState",
+    popover_session_id: str,
+) -> tuple[object | None, str]:
+    """Return a live prompt session, preferring the popover session then active session."""
+    app = None
+    if state.connection is not None and iterm2 is not None and hasattr(iterm2, "async_get_app"):
+        try:
+            app = await iterm2.async_get_app(state.connection)
+        except Exception as exc:
+            logger.debug("Could not refresh iTerm app while resuming prompt: %s", exc)
+
+    if app is not None:
+        session = app.get_session_by_id(popover_session_id)
+        if session is not None:
+            state.prompt_sessions[popover_session_id] = session
+            return session, popover_session_id
+
+        active_session_id = await _get_active_session_id(app)
+        if active_session_id:
+            session = app.get_session_by_id(active_session_id)
+            if session is not None:
+                state.prompt_sessions[active_session_id] = session
+                logger.info(
+                    "Prompt session %s is unavailable; using active session %s",
+                    popover_session_id,
+                    active_session_id,
+                )
+                return session, active_session_id
+        logger.warning("Prompt session is no longer live: %s", popover_session_id)
+        return None, ""
+
+    session = state.prompt_sessions.get(popover_session_id)
+    if session is None:
+        return None, ""
+    stored_session_id = getattr(session, "session_id", popover_session_id)
+    if stored_session_id != popover_session_id:
+        logger.warning(
+            "Stored prompt session id mismatch: expected %s, got %s",
+            popover_session_id,
+            stored_session_id,
+        )
+        return None, ""
+    return session, popover_session_id
 
 
 def _prompt_context_label(

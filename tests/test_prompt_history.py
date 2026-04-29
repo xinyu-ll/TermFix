@@ -305,7 +305,9 @@ class PromptHistoryTests(unittest.TestCase):
         state.prompt_sessions["current-session"] = session
 
         self.assertIs(
-            ui._resume_prompt_in_session(selected, state, "current-session"),
+            self._main_loop.run_until_complete(
+                ui._resume_prompt_in_session(selected, state, "current-session")
+            ),
             True,
         )
 
@@ -315,6 +317,85 @@ class PromptHistoryTests(unittest.TestCase):
         self.assertIs(selected.restored, False)
         self.assertEqual(other.session_id, "")
         self.assertEqual(other.context["cwd"], "/other")
+
+    def test_resume_prompt_rejects_stale_stored_session(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        state = TermFixState()
+        selected = PromptEntry(
+            session_id="",
+            context={"cwd": "/old"},
+            messages=[{"role": "user", "content": "selected"}],
+            status="done",
+            restored=True,
+        )
+        state.prompt_sessions["current-session"] = types.SimpleNamespace(
+            session_id="old-session"
+        )
+
+        self.assertIs(
+            self._main_loop.run_until_complete(
+                ui._resume_prompt_in_session(selected, state, "current-session")
+            ),
+            False,
+        )
+
+        self.assertEqual(selected.session_id, "")
+        self.assertIsNone(selected.session)
+        self.assertEqual(selected.context["cwd"], "/old")
+
+    def test_resume_prompt_falls_back_to_active_session_when_popover_session_closed(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        state = TermFixState()
+        state.connection = object()
+        selected = PromptEntry(
+            session_id="",
+            context={"cwd": "/old"},
+            messages=[{"role": "user", "content": "selected"}],
+            status="done",
+            restored=True,
+        )
+        active_session = types.SimpleNamespace(session_id="active-session")
+
+        class _Tab:
+            current_session = active_session
+
+        class _Window:
+            current_tab = _Tab()
+
+        class _App:
+            current_window = _Window()
+
+            def get_session_by_id(self, session_id):  # noqa: ANN001
+                if session_id == "active-session":
+                    return active_session
+                return None
+
+            async def async_refresh_focus(self):
+                return None
+
+        async def _async_get_app(_connection):  # noqa: ANN001
+            return _App()
+
+        old_async_get_app = getattr(ui.iterm2, "async_get_app", None)
+        ui.iterm2.async_get_app = _async_get_app
+        try:
+            self.assertIs(
+                self._main_loop.run_until_complete(
+                    ui._resume_prompt_in_session(selected, state, "closed-session")
+                ),
+                True,
+            )
+        finally:
+            if old_async_get_app is None:
+                delattr(ui.iterm2, "async_get_app")
+            else:
+                ui.iterm2.async_get_app = old_async_get_app
+
+        self.assertEqual(selected.session_id, "active-session")
+        self.assertIs(selected.session, active_session)
+        self.assertEqual(selected.context, {})
 
 
 if __name__ == "__main__":
