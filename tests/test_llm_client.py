@@ -1,9 +1,15 @@
+import asyncio
+import contextvars
+import threading
+
 import pytest
 
 from termfixlib.llm_client import (
     _build_chat_messages,
     _chat_completions_url,
     _clean_markdown,
+    _remove_prefix,
+    _run_blocking_in_thread,
 )
 
 
@@ -58,3 +64,25 @@ def test_build_chat_messages_falls_back_to_user_message_when_history_is_empty():
 )
 def test_clean_markdown_removes_outer_response_fences(raw, expected):
     assert _clean_markdown(raw) == expected
+
+
+def test_remove_prefix_removes_only_matching_prefix():
+    assert _remove_prefix("```markdown\n### Fix", "```markdown") == "\n### Fix"
+    assert _remove_prefix("```markdown\n### Fix", "```md") == "```markdown\n### Fix"
+    assert _remove_prefix("plain text", "") == "plain text"
+
+
+def test_run_blocking_in_thread_runs_callable_with_context_and_kwargs():
+    request_id = contextvars.ContextVar("request_id", default="missing")
+    request_id.set("ctx-123")
+    caller_thread = threading.get_ident()
+
+    def read_context(prefix, suffix=None):
+        return threading.get_ident(), f"{prefix}:{request_id.get()}:{suffix}"
+
+    worker_thread, result = asyncio.run(
+        _run_blocking_in_thread(read_context, "value", suffix="done")
+    )
+
+    assert worker_thread != caller_thread
+    assert result == "value:ctx-123:done"

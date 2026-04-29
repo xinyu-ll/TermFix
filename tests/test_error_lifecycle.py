@@ -5,9 +5,11 @@ import threading
 import types
 import urllib.request
 import unittest
+from unittest import mock
 
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
+from termfixlib import monitor
 from termfixlib.monitor import ErrorEntry, TermFixState
 from termfixlib.ui import _ensure_status_server, _entry_payload, _pick_entry, _status_endpoint
 
@@ -41,8 +43,12 @@ class ErrorLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
         self._main_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._main_loop)
+        self._old_error_retention_limit = monitor.ERROR_RETENTION_LIMIT
+        self._old_handled_error_retention_limit = monitor.HANDLED_ERROR_RETENTION_LIMIT
 
     def tearDown(self) -> None:
+        monitor.ERROR_RETENTION_LIMIT = self._old_error_retention_limit
+        monitor.HANDLED_ERROR_RETENTION_LIMIT = self._old_handled_error_retention_limit
         asyncio.set_event_loop(None)
         self._main_loop.close()
 
@@ -84,6 +90,66 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertTrue(pending.handled)
         self.assertIsNotNone(pending.handled_at)
 
+    def test_add_error_prunes_handled_entries_before_unhandled_entries(self):
+        monitor.ERROR_RETENTION_LIMIT = 4
+        monitor.HANDLED_ERROR_RETENTION_LIMIT = 10
+        state = TermFixState()
+        handled_old = _entry("session-a", "handled-old", handled=True)
+        handled_old.context = {"terminal_output": "old secret context"}
+        handled_old.result = "old result"
+        entries = [
+            handled_old,
+            _entry("session-a", "unhandled-old"),
+            _entry("session-a", "handled-new", handled=True),
+            _entry("session-a", "unhandled-new"),
+            _entry("session-a", "latest-unhandled"),
+        ]
+
+        for entry in entries:
+            self._main_loop.run_until_complete(state.add_error(entry))
+
+        self.assertIsNone(state.get_error(handled_old.id))
+        self.assertEqual(
+            [entry.command for entry in state.errors],
+            ["unhandled-old", "handled-new", "unhandled-new", "latest-unhandled"],
+        )
+        self.assertEqual(state.latest_unhandled_error().command, "latest-unhandled")
+
+    def test_add_error_bounds_handled_history_below_total_limit(self):
+        monitor.ERROR_RETENTION_LIMIT = 10
+        monitor.HANDLED_ERROR_RETENTION_LIMIT = 2
+        state = TermFixState()
+        entries = [
+            _entry("session-a", "handled-0", handled=True),
+            _entry("session-a", "handled-1", handled=True),
+            _entry("session-a", "pending"),
+            _entry("session-a", "handled-2", handled=True),
+            _entry("session-a", "handled-3", handled=True),
+        ]
+
+        for entry in entries:
+            self._main_loop.run_until_complete(state.add_error(entry))
+
+        self.assertEqual(
+            [entry.command for entry in state.errors],
+            ["pending", "handled-2", "handled-3"],
+        )
+        self.assertEqual(state.latest_unhandled_error().command, "pending")
+
+    def test_mark_error_handled_prunes_old_handled_entries(self):
+        monitor.ERROR_RETENTION_LIMIT = 10
+        monitor.HANDLED_ERROR_RETENTION_LIMIT = 1
+        state = TermFixState()
+        handled_old = _entry("session-a", "handled-old", handled=True)
+        pending = _entry("session-a", "pending")
+        state.errors.extend([handled_old, pending])
+
+        self.assertTrue(state.mark_error_handled(pending.id))
+
+        self.assertIsNone(state.get_error(handled_old.id))
+        self.assertIs(state.get_error(pending.id), pending)
+        self.assertEqual(state.unhandled_error_count, 0)
+
     def test_picker_ignores_handled_entries_and_prefers_clicked_session(self):
         state = TermFixState()
         state.errors.extend(
@@ -105,6 +171,42 @@ class ErrorLifecycleTest(unittest.TestCase):
 
         self.assertIsNone(_pick_entry(state, "session-a"))
         self.assertIsNone(_pick_entry(state, None))
+
+    def test_prompt_event_info_log_does_not_include_raw_payload(self):
+        secret_payload = "deploy --token=secret"
+
+        with self.assertLogs("termfixlib.monitor", level="INFO") as captured:
+            monitor._log_prompt_event(
+                "session-a",
+                types.SimpleNamespace(name="COMMAND_START"),
+                secret_payload,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn("session=session-a", output)
+        self.assertIn("payload_type=str", output)
+        self.assertNotIn(secret_payload, output)
+
+    def test_handle_error_info_log_does_not_include_raw_command(self):
+        state = TermFixState()
+        session = types.SimpleNamespace(session_id="session-a")
+        secret_command = "deploy --token=secret"
+
+        with mock.patch.object(
+            monitor,
+            "collect_context",
+            new=mock.AsyncMock(return_value={}),
+        ):
+            with self.assertLogs("termfixlib.monitor", level="INFO") as captured:
+                self._main_loop.run_until_complete(
+                    monitor._handle_error(object(), session, state, secret_command, 42)
+                )
+
+        output = "\n".join(captured.output)
+        self.assertIn("session=session-a", output)
+        self.assertIn("exit=42", output)
+        self.assertNotIn(secret_command, output)
+        self.assertEqual(state.errors[0].command, secret_command)
 
     def test_state_payload_marks_error_handled_without_close_beacon(self):
         state = TermFixState()

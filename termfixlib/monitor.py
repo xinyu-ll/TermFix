@@ -28,6 +28,8 @@ from .context import collect_context
 logger = logging.getLogger(__name__)
 
 PROMPT_HISTORY_VERSION = 2
+ERROR_RETENTION_LIMIT = 100
+HANDLED_ERROR_RETENTION_LIMIT = 20
 _PROMPT_CONTEXT_TEXT_LIMIT = 2_000
 _PROMPT_CONTEXT_KEYS = (
     "cwd",
@@ -163,13 +165,11 @@ class TermFixState:
     async def add_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
             self.errors.append(entry)
+            self._prune_error_history()
 
     async def remove_error(self, entry: ErrorEntry) -> None:
         async with self._lock:
-            try:
-                self.errors.remove(entry)
-            except ValueError:
-                pass
+            self._discard_error(entry)
 
     async def add_prompt(self, entry: PromptEntry) -> None:
         async with self._lock:
@@ -214,6 +214,45 @@ class TermFixState:
         entry.handled = True
         entry.handled_at = handled_at
         entry.updated_at = handled_at
+        self._prune_error_history()
+        return True
+
+    def _prune_error_history(self) -> None:
+        """Bound captured errors, pruning handled history before live failures."""
+        handled_limit = max(0, int(HANDLED_ERROR_RETENTION_LIMIT))
+        handled_entries = [entry for entry in self.errors if entry.handled]
+        handled_overflow = len(handled_entries) - handled_limit
+        if handled_overflow > 0:
+            for entry in handled_entries[:handled_overflow]:
+                self._discard_error(entry)
+
+        total_limit = max(0, int(ERROR_RETENTION_LIMIT))
+        total_overflow = len(self.errors) - total_limit
+        if total_overflow <= 0:
+            return
+
+        for entry in list(self.errors):
+            if total_overflow <= 0:
+                break
+            if not entry.handled:
+                continue
+            if self._discard_error(entry):
+                total_overflow -= 1
+
+        total_overflow = len(self.errors) - total_limit
+        if total_overflow <= 0:
+            return
+
+        for entry in list(self.errors)[:total_overflow]:
+            self._discard_error(entry)
+
+    def _discard_error(self, entry: ErrorEntry) -> bool:
+        try:
+            self.errors.remove(entry)
+        except ValueError:
+            return False
+        self.popover_last_seen.pop(entry.id, None)
+        self.popover_close_requests.discard(entry.id)
         return True
 
     def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
@@ -388,12 +427,7 @@ async def _session_worker(
                 try:
                     event = await mon.async_get()
                     mode, payload = _unpack_event(event)
-                    logger.info(
-                        "Prompt event — session=%s mode=%s payload=%r",
-                        session_id,
-                        getattr(mode, "name", mode),
-                        payload,
-                    )
+                    _log_prompt_event(session_id, mode, payload)
                     if mode == iterm2.PromptMonitor.Mode.COMMAND_START:
                         current_command = payload if isinstance(payload, str) else ""
                         if not current_command:
@@ -432,6 +466,24 @@ def _unpack_event(event):
     return getattr(event, "mode", event), getattr(event, "value", None)
 
 
+def _log_prompt_event(session_id: str, mode, payload) -> None:  # noqa: ANN001
+    """Log prompt-monitor lifecycle metadata without exposing command payloads."""
+    mode_name = getattr(mode, "name", mode)
+    payload_type = "none" if payload is None else type(payload).__name__
+    logger.info(
+        "Prompt event - session=%s mode=%s payload_type=%s",
+        session_id,
+        mode_name,
+        payload_type,
+    )
+    logger.debug(
+        "Prompt event payload - session=%s mode=%s payload=%r",
+        session_id,
+        mode_name,
+        payload,
+    )
+
+
 async def _handle_error(
     connection: iterm2.Connection,
     session: iterm2.Session,
@@ -441,7 +493,12 @@ async def _handle_error(
 ) -> None:
     """Collect context and record a new error entry in shared state."""
     logger.info(
-        "Error captured — session=%s exit=%d cmd=%r",
+        "Error captured - session=%s exit=%d",
+        session.session_id,
+        exit_code,
+    )
+    logger.debug(
+        "Captured failing command - session=%s exit=%d cmd=%r",
         session.session_id,
         exit_code,
         command,

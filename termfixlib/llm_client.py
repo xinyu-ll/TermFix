@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import json
 import logging
 import os
@@ -11,7 +13,7 @@ import threading
 import urllib.error
 import urllib.request
 import urllib.parse
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional, TypeVar
 
 from .config import DEFAULT_BASE_URL, DEFAULT_MODEL, SYSTEM_PROMPT
 from .context import build_manual_system_prompt, build_user_message
@@ -19,6 +21,7 @@ from .context import build_manual_system_prompt, build_user_message
 logger = logging.getLogger(__name__)
 
 AnalysisResult = str
+_ResultT = TypeVar("_ResultT")
 
 _EMPTY_RESULT: AnalysisResult = """\
 ### Cause
@@ -33,6 +36,25 @@ Could not contact the API.
 
 _USER_AGENT = "TermFix/1.0"
 _MACOS_CA_FILE = "/private/etc/ssl/cert.pem"
+
+
+async def _run_blocking_in_thread(
+    func: Callable[..., _ResultT],
+    *args: Any,
+    **kwargs: Any,
+) -> _ResultT:
+    """Run blocking work on the default executor while preserving context."""
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    call = functools.partial(context.run, func, *args, **kwargs)
+    return await loop.run_in_executor(None, call)
+
+
+def _remove_prefix(value: str, prefix: str) -> str:
+    """Return value without prefix when present."""
+    if value.startswith(prefix):
+        return value[len(prefix) :]
+    return value
 
 
 class ApiError(Exception):
@@ -178,7 +200,7 @@ async def _call_api(
     messages: Optional[list[dict]] = None,
 ) -> AnalysisResult:
     """Make the actual API call and return Markdown."""
-    response_text = await asyncio.to_thread(
+    response_text = await _run_blocking_in_thread(
         _post_chat_completion,
         api_key,
         base_url,
@@ -429,9 +451,9 @@ def _clean_markdown(raw: str) -> str:
     text = raw.strip()
 
     if text.startswith("```markdown"):
-        text = text.removeprefix("```markdown").strip()
+        text = _remove_prefix(text, "```markdown").strip()
     elif text.startswith("```md"):
-        text = text.removeprefix("```md").strip()
+        text = _remove_prefix(text, "```md").strip()
 
     if text.endswith("```"):
         text = text[:-3].strip()

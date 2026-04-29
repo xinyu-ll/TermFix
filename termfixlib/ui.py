@@ -50,6 +50,95 @@ _PROMPT_POPOVER_ID = "__prompt__"
 _STATE_LOOP_CALL_TIMEOUT = 2
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset({"/closed", "/prompt/new", "/prompt", "/state"})
+_CODE_BLOCK_COPY_CSS = """\
+    .code-block {
+      position: relative;
+      margin: 7px 0 10px;
+      border-radius: 8px;
+      background: #1d1d1b;
+      overflow: hidden;
+    }
+    .copy-code {
+      position: absolute;
+      top: 7px;
+      right: 7px;
+      z-index: 1;
+      height: 24px;
+      min-width: 48px;
+      padding: 0 8px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      color: rgba(255, 255, 255, 0.78);
+      font: 700 11px var(--sans, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif);
+      cursor: pointer;
+    }
+    .copy-code:hover {
+      background: rgba(255, 255, 255, 0.14);
+      color: #ffffff;
+    }
+    .copy-code.copied {
+      color: #ffffff;
+      background: rgba(36, 165, 121, 0.5);
+    }
+    .markdown pre {
+      margin: 0;
+      padding: 9px 11px;
+      padding-right: 68px;
+      overflow-x: auto;
+      background: #1d1d1b;
+    }
+"""
+_CODE_BLOCK_COPY_JS = """\
+    async function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const copyTarget = document.createElement("textarea");
+      copyTarget.value = text;
+      copyTarget.setAttribute("readonly", "");
+      copyTarget.style.position = "fixed";
+      copyTarget.style.left = "-9999px";
+      document.body.appendChild(copyTarget);
+      copyTarget.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        document.body.removeChild(copyTarget);
+      }
+    }
+
+    function handleCodeBlockCopy(event) {
+      const target = event.target && event.target.closest ? event.target : null;
+      const copyButton = target ? target.closest("[data-copy-code]") : null;
+      if (!copyButton) {
+        return false;
+      }
+
+      const block = copyButton.closest(".code-block");
+      const code = block ? block.querySelector("code") : null;
+      if (!code) {
+        return true;
+      }
+
+      copyText(code.textContent || "").then(() => {
+        copyButton.textContent = "Copied";
+        copyButton.classList.add("copied");
+        setTimeout(() => {
+          copyButton.textContent = "Copy";
+          copyButton.classList.remove("copied");
+        }, 1200);
+      }).catch(() => {
+        copyButton.textContent = "Failed";
+        copyButton.classList.remove("copied");
+        setTimeout(() => {
+          copyButton.textContent = "Copy";
+        }, 1200);
+      });
+      return true;
+    }
+"""
 
 
 def _popover_cors_origin(origin: str) -> Optional[str]:
@@ -919,13 +1008,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     .markdown ul,
     .markdown ol {{ margin: 0 0 8px 18px; padding: 0; }}
     .markdown li {{ margin-bottom: 4px; }}
-    .markdown pre {{
-      background: #1c1c1e;
-      border-radius: 6px;
-      padding: 8px 12px;
-      overflow-x: auto;
-      margin: 6px 0 10px;
-    }}
+{_CODE_BLOCK_COPY_CSS}
     .markdown code {{
       font-family: "Menlo", "Monaco", "Courier New", monospace;
       font-size: 12px;
@@ -1008,6 +1091,8 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       window.close();
     }}
 
+{_CODE_BLOCK_COPY_JS}
+
     async function refresh() {{
       try {{
         const sep = endpoint.includes("?") ? "&" : "?";
@@ -1032,6 +1117,8 @@ def _build_live_html(entry, state: "TermFixState") -> str:
         statusEl.className = "status error";
       }}
     }}
+
+    contentEl.addEventListener("click", handleCodeBlockCopy);
 
     document.addEventListener("keydown", (event) => {{
       if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
@@ -1514,13 +1601,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     .markdown ul,
     .markdown ol {{ margin: 0 0 8px 18px; padding: 0; }}
     .markdown li {{ margin-bottom: 4px; }}
-    .markdown pre {{
-      margin: 7px 0 10px;
-      padding: 9px 11px;
-      overflow-x: auto;
-      border-radius: 8px;
-      background: #1d1d1b;
-    }}
+{_CODE_BLOCK_COPY_CSS}
     .markdown code {{
       padding: 1px 4px;
       border-radius: 4px;
@@ -1659,6 +1740,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       contentEl.scrollTop = contentEl.scrollHeight;
     }}
 
+{_CODE_BLOCK_COPY_JS}
+
     async function refresh() {{
       try {{
         const response = await fetch(withEntry(stateEndpoint) + "&t=" + Date.now(), {{
@@ -1775,6 +1858,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     }});
 
     contentEl.addEventListener("click", (event) => {{
+      if (handleCodeBlockCopy(event)) {{
+        return;
+      }}
+
       const starter = event.target.closest("[data-prompt]");
       if (!starter || busy) {{
         return;
@@ -2263,16 +2350,21 @@ def _markdown_to_html(markdown: str) -> str:
             blocks.append("<ul>" + "".join(f"<li>{item}</li>" for item in list_items) + "</ul>")
             list_items = []
 
+    def code_block_html(lines: list[str]) -> str:
+        code = html.escape("\n".join(lines))
+        return (
+            '<div class="code-block">'
+            '<button class="copy-code" type="button" data-copy-code>Copy</button>'
+            f"<pre><code>{code}</code></pre>"
+            "</div>"
+        )
+
     for line in lines:
         stripped = line.strip()
 
         if stripped.startswith("```"):
             if in_code:
-                blocks.append(
-                    "<pre><code>"
-                    + html.escape("\n".join(code_lines))
-                    + "</code></pre>"
-                )
+                blocks.append(code_block_html(code_lines))
                 code_lines = []
                 in_code = False
             else:
@@ -2309,9 +2401,7 @@ def _markdown_to_html(markdown: str) -> str:
             paragraph.append(stripped)
 
     if in_code:
-        blocks.append(
-            "<pre><code>" + html.escape("\n".join(code_lines)) + "</code></pre>"
-        )
+        blocks.append(code_block_html(code_lines))
     flush_paragraph()
     flush_list()
 
