@@ -13,6 +13,7 @@ from termfixlib import monitor, ui
 from termfixlib.monitor import ErrorEntry, PromptEntry, TermFixState
 from termfixlib.ui import (
     _cancel_analysis,
+    _dismiss_error,
     _ensure_status_server,
     _entry_payload,
     _entry_payload_on_loop,
@@ -309,6 +310,25 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertEqual(failed.result, "Retry succeeded.")
         self.assertEqual(failed.status, "done")
         self.assertTrue(failed.analysis_started)
+        self.assertEqual(notifications, [True])
+
+    def test_dismiss_error_marks_handled_and_requests_popover_close(self):
+        state = TermFixState()
+        pending = _entry("session-a", "pytest")
+        pending.status = "streaming"
+        state.errors.append(pending)
+        notifications = []
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        state.notify_ui_update = notify_ui_update
+
+        payload = self._main_loop.run_until_complete(_dismiss_error(pending.id, state))
+
+        self.assertEqual(payload, {"ok": True, "handled": True})
+        self.assertTrue(pending.handled)
+        self.assertIn(pending.id, state.popover_close_requests)
         self.assertEqual(notifications, [True])
 
     def test_prompt_event_info_log_does_not_include_raw_payload(self):

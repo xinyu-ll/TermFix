@@ -69,6 +69,7 @@ _POPOVER_ROUTES = frozenset(
     {
         "/cancel",
         "/closed",
+        "/dismiss",
         "/insert",
         "/prompt/new",
         "/prompt",
@@ -747,6 +748,14 @@ def _ensure_status_server_locked(state: "TermFixState") -> None:
                 self._send_json(_cancel_analysis_from_thread(state, entry_id))
                 return
 
+            if request_path == "/dismiss":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                self._send_json(_dismiss_error_from_thread(state, entry_id))
+                return
+
             if request_path == "/retry":
                 if self.command != "POST":
                     self.send_error(405)
@@ -952,6 +961,17 @@ def _retry_analysis_from_thread(state: "TermFixState", entry_id: str) -> dict:
     )
 
 
+def _dismiss_error_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Mark an error handled without waiting for analysis to finish."""
+    if not entry_id:
+        return {"ok": False, "error": "Missing entry."}
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _dismiss_error(entry_id, state),
+        "Error dismiss",
+    )
+
+
 async def _cancel_analysis(entry_id: str, state: "TermFixState") -> dict:
     entry = state.get_prompt(entry_id) or state.get_error(entry_id)
     if entry is None:
@@ -990,6 +1010,17 @@ async def _retry_analysis(entry_id: str, state: "TermFixState") -> dict:
     _start_analysis_task_on_loop(entry, state)
     await state.notify_ui_update()
     return {"ok": True, "status": entry.status}
+
+
+async def _dismiss_error(entry_id: str, state: "TermFixState") -> dict:
+    entry = state.get_error(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "Entry expired."}
+    handled = state.mark_error_handled(entry_id)
+    state.request_popover_close(entry_id)
+    if handled:
+        await state.notify_ui_update()
+    return {"ok": True, "handled": handled}
 
 
 def _entry_payload_from_thread(
@@ -1384,6 +1415,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
         f"{REDACTION_STATUS_TEXT}: command/output redacted before sending."
     )
     endpoint = json.dumps(_status_endpoint(state, "/state"))
+    dismiss_endpoint = json.dumps(_status_endpoint(state, "/dismiss"))
     retry_endpoint = json.dumps(_status_endpoint(state, "/retry"))
     close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
     close_key = json.dumps(
@@ -1509,9 +1541,23 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     }}
     .status {{
       flex: 0 0 auto;
-      margin-left: auto;
       font-size: 11px;
       color: var(--muted);
+    }}
+    .dismiss-button {{
+      margin-left: auto;
+      min-height: 26px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      font: 700 12px var(--sans);
+      padding: 3px 9px;
+      cursor: pointer;
+    }}
+    .dismiss-button:hover {{
+      color: var(--ink);
+      background: var(--field);
     }}
     .security-note {{
       flex: 0 0 auto;
@@ -1640,6 +1686,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     <h1>TermFix</h1>
     <span id="failed-cmd" class="failed-cmd">{failed_cmd}</span>
     <span id="exit-code" class="badge">exit {exit_code}</span>
+    <button id="dismiss-button" class="dismiss-button" type="button">Ignore</button>
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
 
@@ -1655,6 +1702,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
   </div>
   <script>
     const endpoint = {endpoint};
+    const dismissEndpoint = {dismiss_endpoint};
     const retryEndpoint = {retry_endpoint};
     const closeEndpoint = {close_endpoint};
     const initialEntryId = {active_entry_id};
@@ -1667,6 +1715,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     const errorListEl = document.getElementById("error-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
+    const dismissButton = document.getElementById("dismiss-button");
     const retryButton = document.getElementById("retry-button");
     let lastHtml = contentEl.innerHTML;
     let timer = null;
@@ -1883,7 +1932,30 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       }}
     }}
 
+    async function dismissError() {{
+      if (!activeEntryId || dismissButton.disabled) {{
+        return;
+      }}
+      dismissButton.disabled = true;
+      try {{
+        const response = await fetch(withEntry(dismissEndpoint, activeEntryId), {{
+          method: "POST",
+          cache: "no-store"
+        }});
+        const data = await response.json();
+        if (!data.ok) {{
+          throw new Error(data.error || "Dismiss failed.");
+        }}
+        closePopover();
+      }} catch (error) {{
+        dismissButton.disabled = false;
+        setStatus("error");
+        contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
+      }}
+    }}
+
     contentEl.addEventListener("click", handleCodeBlockCopy);
+    dismissButton.addEventListener("click", dismissError);
     retryButton.addEventListener("click", retryAnalysis);
 
     errorListEl.addEventListener("click", (event) => {{

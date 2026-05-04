@@ -267,7 +267,10 @@ def test_live_popover_includes_retry_control_for_error_state():
 
     live_html = _build_live_html(live_entry, state)
 
+    assert 'const dismissEndpoint = "http://127.0.0.1:9/test-token/dismiss";' in live_html
     assert 'const retryEndpoint = "http://127.0.0.1:9/test-token/retry";' in live_html
+    assert '<button id="dismiss-button" class="dismiss-button" type="button">Ignore</button>' in live_html
+    assert "async function dismissError()" in live_html
     assert '<button id="retry-button" type="button">Retry analysis</button>' in live_html
     assert "async function retryAnalysis()" in live_html
     assert "setRetryVisible(Boolean(data.can_retry));" in live_html
