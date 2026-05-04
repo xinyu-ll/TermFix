@@ -52,6 +52,8 @@ _TRANSIENT_NETWORK_ERRORS = (
     TimeoutError,
     socket.timeout,
 )
+_SSL_CONTEXT_UNSET = object()
+_ssl_ctx_cache = _SSL_CONTEXT_UNSET
 
 
 async def _run_blocking_in_thread(
@@ -599,12 +601,19 @@ def _urlopen(request: urllib.request.Request, timeout: int):
 
 
 def _ssl_context() -> Optional[ssl.SSLContext]:
+    global _ssl_ctx_cache
+    if _ssl_ctx_cache is not _SSL_CONTEXT_UNSET:
+        return _ssl_ctx_cache
+
     paths = ssl.get_default_verify_paths()
     if paths.cafile and os.path.exists(paths.cafile):
-        return None
+        _ssl_ctx_cache = None
+        return _ssl_ctx_cache
     if os.path.exists(_MACOS_CA_FILE):
-        return ssl.create_default_context(cafile=_MACOS_CA_FILE)
-    return None
+        _ssl_ctx_cache = ssl.create_default_context(cafile=_MACOS_CA_FILE)
+        return _ssl_ctx_cache
+    _ssl_ctx_cache = None
+    return _ssl_ctx_cache
 
 
 def _extract_error_message(body: str) -> str:

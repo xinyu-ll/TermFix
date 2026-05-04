@@ -6,6 +6,7 @@ import io
 import json
 import threading
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,6 +21,7 @@ from termfixlib.llm_client import (
     _post_chat_completion_stream,
     _remove_prefix,
     _run_blocking_in_thread,
+    _ssl_context,
     check_provider_connection,
 )
 
@@ -170,6 +172,63 @@ def test_post_connection_test_uses_configured_url_header_payload_and_timeout(mon
         {"role": "system", "content": "You are a connection test. Reply with OK."},
         {"role": "user", "content": "Reply with OK."},
     ]
+
+
+def test_ssl_context_caches_default_ca_result(monkeypatch):
+    monkeypatch.setattr(llm_client, "_ssl_ctx_cache", llm_client._SSL_CONTEXT_UNSET)
+    exists_calls = []
+
+    def fake_exists(path):  # noqa: ANN001
+        exists_calls.append(path)
+        return path == "/default-ca.pem"
+
+    monkeypatch.setattr(
+        llm_client.ssl,
+        "get_default_verify_paths",
+        lambda: SimpleNamespace(cafile="/default-ca.pem"),
+    )
+    monkeypatch.setattr(llm_client.os.path, "exists", fake_exists)
+    monkeypatch.setattr(
+        llm_client.ssl,
+        "create_default_context",
+        lambda **kwargs: pytest.fail("default CA should not create a fallback context"),
+    )
+
+    assert _ssl_context() is None
+    assert _ssl_context() is None
+    assert exists_calls == ["/default-ca.pem"]
+
+
+def test_ssl_context_caches_macos_fallback_context(monkeypatch):
+    monkeypatch.setattr(llm_client, "_ssl_ctx_cache", llm_client._SSL_CONTEXT_UNSET)
+    exists_calls = []
+    created = []
+    fake_context = object()
+
+    def fake_exists(path):  # noqa: ANN001
+        exists_calls.append(path)
+        return path == llm_client._MACOS_CA_FILE
+
+    def fake_create_default_context(**kwargs):  # noqa: ANN003
+        created.append(kwargs)
+        return fake_context
+
+    monkeypatch.setattr(
+        llm_client.ssl,
+        "get_default_verify_paths",
+        lambda: SimpleNamespace(cafile="/missing-default-ca.pem"),
+    )
+    monkeypatch.setattr(llm_client.os.path, "exists", fake_exists)
+    monkeypatch.setattr(
+        llm_client.ssl,
+        "create_default_context",
+        fake_create_default_context,
+    )
+
+    assert _ssl_context() is fake_context
+    assert _ssl_context() is fake_context
+    assert exists_calls == ["/missing-default-ca.pem", llm_client._MACOS_CA_FILE]
+    assert created == [{"cafile": llm_client._MACOS_CA_FILE}]
 
 
 def test_check_provider_connection_returns_structured_error_and_redacts_key(monkeypatch, caplog):
