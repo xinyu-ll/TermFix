@@ -264,8 +264,60 @@ class StateLoopThreadsafeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "registration timed out"):
             asyncio.run(_register())
 
+    def test_hotkey_listener_failure_updates_state_warning(self) -> None:
+        notifications = []
+
+        class _FailingKeystrokeFilter:
+            def __init__(self, connection, patterns):  # noqa: ANN001
+                self.connection = connection
+                self.patterns = patterns
+
+            async def __aenter__(self):
+                raise RuntimeError("keyboard monitor denied")
+
+            async def __aexit__(self, exc_type, exc, traceback):  # noqa: ANN001
+                return False
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        fake_iterm2 = SimpleNamespace(
+            Keycode=SimpleNamespace(),
+            KeystrokeFilter=_FailingKeystrokeFilter,
+        )
+        state = SimpleNamespace(
+            fix_hotkey="Cmd+J",
+            prompt_hotkey="Cmd+L",
+            hotkey_listener_error="",
+            notify_ui_update=notify_ui_update,
+        )
+
+        async def _exercise() -> None:
+            with mock.patch.object(ui, "iterm2", fake_iterm2):
+                task = asyncio.create_task(
+                    ui.start_hotkey_listener(object(), object(), state)
+                )
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                self.assertEqual(state.hotkey_listener_error, "keyboard monitor denied")
+                self.assertEqual(notifications, [True])
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(_exercise())
+
 
 class HotkeyConfigTests(unittest.TestCase):
+    def test_status_badge_text_warns_when_hotkey_listener_failed(self) -> None:
+        state = SimpleNamespace(
+            hotkey_listener_error="keyboard monitor denied",
+            analyzing=False,
+            unhandled_error_count=0,
+        )
+
+        self.assertEqual(ui._status_badge_text(state), "⚠ Hotkey off")
+
     def test_termfix_hotkey_kind_uses_configured_state_hotkeys(self) -> None:
         class _Modifier:
             COMMAND = "command"

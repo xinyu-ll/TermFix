@@ -61,6 +61,7 @@ _PROMPT_POPOVER_ID = "__prompt__"
 _ERROR_INBOX_LIMIT = 10
 _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
+_STATUS_HOTKEY_ERROR = "⚠ Hotkey off"
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset(
     {
@@ -175,12 +176,7 @@ async def register_status_bar(
     @iterm2.StatusBarRPC
     async def _status_coro(knobs):
         _sync_knobs(state, knobs)
-        if state.analyzing:
-            return "⏳ Analyzing..."
-        unhandled_count = state.unhandled_error_count
-        if unhandled_count == 0:
-            return STATUS_NORMAL
-        return STATUS_ERROR_FMT.format(count=unhandled_count)
+        return _status_badge_text(state)
 
     @iterm2.RPC
     async def _on_click(session_id):
@@ -215,6 +211,7 @@ async def start_hotkey_listener(
 ) -> None:
     """Listen for TermFix hotkeys in the active session."""
     patterns = _build_command_letter_patterns()
+    state.hotkey_listener_error = ""
 
     try:
         logger.info("TermFix hotkey listener registered (%s, %s)", state.fix_hotkey, state.prompt_hotkey)
@@ -242,7 +239,20 @@ async def start_hotkey_listener(
         raise
     except Exception as exc:
         logger.error("TermFix hotkey listener failed: %s", exc, exc_info=True)
+        state.hotkey_listener_error = str(exc) or exc.__class__.__name__
+        await state.notify_ui_update()
         await asyncio.Event().wait()
+
+
+def _status_badge_text(state: "TermFixState") -> str:
+    if getattr(state, "hotkey_listener_error", ""):
+        return _STATUS_HOTKEY_ERROR
+    if getattr(state, "analyzing", False):
+        return "⏳ Analyzing..."
+    unhandled_count = getattr(state, "unhandled_error_count", 0)
+    if unhandled_count == 0:
+        return STATUS_NORMAL
+    return STATUS_ERROR_FMT.format(count=unhandled_count)
 
 
 async def _handle_click(

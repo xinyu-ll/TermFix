@@ -162,6 +162,7 @@ class TermFixState:
         self.fix_hotkey_error: str = ""
         self.prompt_hotkey: str = DEFAULT_PROMPT_HOTKEY
         self.prompt_hotkey_error: str = ""
+        self.hotkey_listener_error: str = ""
         self.analyzing: bool = False
         self.analysis_tasks: dict[str, asyncio.Task] = {}
 
