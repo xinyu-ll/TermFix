@@ -378,6 +378,39 @@ def test_prompt_popover_shows_streaming_feedback_and_button_state():
     assert "textarea {\n      flex: 1;\n      min-height: 42px;\n      max-height: 180px;" in prompt_html
 
 
+def test_prompt_popover_includes_history_search_filter():
+    state = SimpleNamespace(
+        status_server_url="http://127.0.0.1:9",
+        status_server_token="test-token",
+        prompts=[],
+        context_lines=12,
+        prompt_hotkey="Cmd+L",
+    )
+    prompt_entry = SimpleNamespace(
+        id="prompt-1",
+        session_id="session-1",
+        context={"context_lines": 8},
+        messages=[
+            {"role": "user", "content": "git push failed"},
+            {"role": "assistant", "content": "Auth failed. Refresh credentials."},
+        ],
+        result="",
+        status="done",
+        timestamp=1,
+        restored=False,
+    )
+    state.prompts = [prompt_entry]
+
+    prompt_html = _build_prompt_html(prompt_entry, state)
+
+    assert 'id="history-search"' in prompt_html
+    assert 'placeholder="Search history..."' in prompt_html
+    assert 'data-search="git push failed Auth failed. Refresh credentials."' in prompt_html
+    assert "function applyHistoryFilter()" in prompt_html
+    assert 'historySearchEl.addEventListener("input", applyHistoryFilter);' in prompt_html
+    assert "applyHistoryFilter();" in prompt_html
+
+
 def test_prompt_empty_state_uses_recent_context_for_starters():
     rendered = _conversation_to_html(
         [],

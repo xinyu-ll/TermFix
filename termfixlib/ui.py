@@ -2086,7 +2086,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       width: 100%;
       height: 36px;
       flex: 0 0 36px;
-      margin: 0 0 18px;
+      margin: 0 0 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel-strong);
@@ -2099,6 +2099,26 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       margin-right: 10px;
       font-family: var(--mono);
       font-weight: 800;
+    }}
+    .history-search {{
+      width: 100%;
+      height: 32px;
+      flex: 0 0 32px;
+      margin: 0 0 12px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      outline: none;
+      background: var(--panel-strong);
+      color: var(--ink);
+      font: 12px var(--sans);
+    }}
+    .history-search:focus {{
+      border-color: var(--line-strong);
+      box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.14);
+    }}
+    .history-search::placeholder {{
+      color: var(--muted);
     }}
     .history-list {{
       flex: 1;
@@ -2136,6 +2156,10 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     .history-item.active {{
       border-color: var(--line);
       background: var(--panel-strong);
+    }}
+    .history-group[hidden],
+    .history-item[hidden] {{
+      display: none;
     }}
     .history-main {{
       display: flex;
@@ -2496,6 +2520,9 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       .new-chat {{
         margin-bottom: 10px;
       }}
+      .history-search {{
+        margin-bottom: 10px;
+      }}
       .history-list {{
         display: flex;
         gap: 8px;
@@ -2527,6 +2554,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     <div class="prompt-shell">
       <aside class="history-pane">
         <button id="new-chat-button" class="new-chat" type="button">New chat</button>
+        <input id="history-search" class="history-search" type="search" placeholder="Search history..." autocomplete="off" spellcheck="false">
         <div id="history-list" class="history-list">{history}</div>
       </aside>
       <section id="chat-pane" class="chat-pane">
@@ -2567,6 +2595,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
     const sendButton = document.getElementById("send-button");
     const stopButton = document.getElementById("stop-button");
     const newChatButton = document.getElementById("new-chat-button");
+    const historySearchEl = document.getElementById("history-search");
     const historyListEl = document.getElementById("history-list");
     const chatPaneEl = document.getElementById("chat-pane");
     const contentEl = document.getElementById("content");
@@ -2647,6 +2676,39 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
       contentEl.scrollTop = contentEl.scrollHeight;
     }}
 
+    function applyHistoryFilter() {{
+      const query = historySearchEl.value.trim().toLowerCase();
+      const children = Array.from(historyListEl.children);
+      let currentGroup = null;
+      let groupHasVisibleItems = false;
+
+      function finishGroup() {{
+        if (currentGroup) {{
+          currentGroup.hidden = Boolean(query) && !groupHasVisibleItems;
+        }}
+      }}
+
+      for (const child of children) {{
+        if (child.classList.contains("history-group")) {{
+          finishGroup();
+          currentGroup = child;
+          groupHasVisibleItems = false;
+          child.hidden = false;
+          continue;
+        }}
+        if (!child.classList.contains("history-item")) {{
+          continue;
+        }}
+        const haystack = (child.dataset.search || child.textContent || "").toLowerCase();
+        const visible = !query || haystack.includes(query);
+        child.hidden = !visible;
+        if (visible) {{
+          groupHasVisibleItems = true;
+        }}
+      }}
+      finishGroup();
+    }}
+
 {_CODE_BLOCK_COPY_JS}
 
     async function refresh() {{
@@ -2666,6 +2728,7 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         }}
         if (typeof data.history_html === "string") {{
           historyListEl.innerHTML = data.history_html;
+          applyHistoryFilter();
         }}
         if (typeof data.context_label === "string") {{
           contextLabelEl.textContent = data.context_label;
@@ -2775,6 +2838,8 @@ def _build_prompt_html(entry: PromptEntry, state: "TermFixState") -> str:
         contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
       }}
     }});
+
+    historySearchEl.addEventListener("input", applyHistoryFilter);
 
     historyListEl.addEventListener("click", (event) => {{
       const item = event.target.closest("[data-entry-id]");
@@ -3249,12 +3314,15 @@ def _prompt_history_to_html(
         if _is_detached_prompt(entry):
             full_title = f"{full_title} - restored history"
         full_title = html.escape(full_title)
-        preview = html.escape(_prompt_history_preview(entry))
+        raw_preview = _prompt_history_preview(entry)
+        preview = html.escape(raw_preview)
+        search_text = html.escape(f"{_prompt_history_title(entry, limit=None)} {raw_preview}")
         timestamp = html.escape(time.strftime("%H:%M", time.localtime(entry.timestamp)))
         badge = '<span class="history-badge">Restored</span>' if restored else ""
         blocks.append(
             f'<button class="history-item{active}{status}{restored}" '
-            f'data-entry-id="{html.escape(entry.id)}" title="{full_title}" type="button">'
+            f'data-entry-id="{html.escape(entry.id)}" data-search="{search_text}" '
+            f'title="{full_title}" type="button">'
             '<span class="history-main">'
             f'<span class="history-title">{title}</span>'
             f'<span class="history-time">{timestamp}</span>'
