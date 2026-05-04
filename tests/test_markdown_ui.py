@@ -247,6 +247,32 @@ def test_live_popover_slows_polling_after_analysis_done():
     assert "timer = setInterval(refresh, pollDelay);" in live_html
 
 
+def test_live_popover_includes_retry_control_for_error_state():
+    state = SimpleNamespace(
+        status_server_url="http://127.0.0.1:9",
+        status_server_token="test-token",
+        prompts=[],
+        context_lines=12,
+    )
+    live_entry = SimpleNamespace(
+        id="error-1",
+        session_id="session-1",
+        command="pytest",
+        exit_code=1,
+        result="Network error.",
+        status="error",
+        handled=False,
+    )
+
+    live_html = _build_live_html(live_entry, state)
+
+    assert 'const retryEndpoint = "http://127.0.0.1:9/test-token/retry";' in live_html
+    assert '<button id="retry-button" type="button">Retry analysis</button>' in live_html
+    assert "async function retryAnalysis()" in live_html
+    assert "setRetryVisible(Boolean(data.can_retry));" in live_html
+    assert 'fetch(withEntry(retryEndpoint, activeEntryId), {' in live_html
+
+
 def test_prompt_context_label_mentions_redaction_status():
     entry = SimpleNamespace(session_id="session-1", context={"context_lines": 8}, messages=[])
     state = SimpleNamespace(context_lines=12)

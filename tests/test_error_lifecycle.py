@@ -18,6 +18,7 @@ from termfixlib.ui import (
     _entry_payload_on_loop,
     _mark_popover_closed,
     _pick_entry,
+    _retry_analysis,
     _status_endpoint,
 )
 
@@ -275,6 +276,41 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertEqual(prompt.status, "cancelled")
         self.assertEqual(prompt.result, "Partial response")
 
+    def test_retry_analysis_resets_failed_error_and_starts_new_task(self):
+        state = TermFixState()
+        state.loop = self._main_loop
+        failed = _entry("session-a", "pytest")
+        failed.status = "error"
+        failed.result = "Network error."
+        failed.analysis_started = True
+        state.errors.append(failed)
+        notifications = []
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        async def fake_run_streaming_analysis(entry, state):  # noqa: ANN001
+            entry.result = "Retry succeeded."
+            entry.status = "done"
+            state.analysis_tasks.pop(entry.id, None)
+
+        state.notify_ui_update = notify_ui_update
+        with mock.patch.object(
+            ui,
+            "_run_streaming_analysis",
+            side_effect=fake_run_streaming_analysis,
+        ):
+            payload = self._main_loop.run_until_complete(
+                _retry_analysis(failed.id, state)
+            )
+            self._main_loop.run_until_complete(asyncio.sleep(0))
+
+        self.assertEqual(payload, {"ok": True, "status": "streaming"})
+        self.assertEqual(failed.result, "Retry succeeded.")
+        self.assertEqual(failed.status, "done")
+        self.assertTrue(failed.analysis_started)
+        self.assertEqual(notifications, [True])
+
     def test_prompt_event_info_log_does_not_include_raw_payload(self):
         secret_payload = "deploy --token=secret"
 
@@ -325,6 +361,19 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertEqual(state.unhandled_error_count, 0)
         self.assertTrue(pending.handled)
         self.assertIsNotNone(pending.handled_at)
+
+    def test_state_payload_marks_error_retry_available_only_for_error_status(self):
+        state = TermFixState()
+        failed = _entry("session-a", "pytest")
+        failed.status = "error"
+        failed.result = "Network error."
+        done = _entry("session-a", "make test")
+        done.status = "done"
+        done.result = "Already analyzed."
+        state.errors.extend([failed, done])
+
+        self.assertTrue(_entry_payload(state, failed.id)["can_retry"])
+        self.assertFalse(_entry_payload(state, done.id)["can_retry"])
 
     def test_state_payload_includes_error_inbox_with_active_entry(self):
         state = TermFixState()

@@ -71,6 +71,7 @@ _POPOVER_ROUTES = frozenset(
         "/insert",
         "/prompt/new",
         "/prompt",
+        "/retry",
         "/state",
         "/test-connection",
     }
@@ -743,6 +744,14 @@ def _ensure_status_server_locked(state: "TermFixState") -> None:
                 self._send_json(_cancel_analysis_from_thread(state, entry_id))
                 return
 
+            if request_path == "/retry":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                entry_id = parse_qs(parsed.query).get("entry", [""])[0]
+                self._send_json(_retry_analysis_from_thread(state, entry_id))
+                return
+
             if request_path == "/prompt/new":
                 if self.command != "POST":
                     self.send_error(405)
@@ -929,6 +938,17 @@ def _cancel_analysis_from_thread(state: "TermFixState", entry_id: str) -> dict:
     )
 
 
+def _retry_analysis_from_thread(state: "TermFixState", entry_id: str) -> dict:
+    """Retry a failed error analysis on the asyncio loop."""
+    if not entry_id:
+        return {"ok": False, "error": "Missing entry."}
+    return _call_state_loop_from_thread(
+        state,
+        lambda: _retry_analysis(entry_id, state),
+        "Analysis retry",
+    )
+
+
 async def _cancel_analysis(entry_id: str, state: "TermFixState") -> dict:
     entry = state.get_prompt(entry_id) or state.get_error(entry_id)
     if entry is None:
@@ -946,6 +966,27 @@ async def _cancel_analysis(entry_id: str, state: "TermFixState") -> dict:
     state.refresh_analyzing()
     await state.notify_ui_update()
     return {"ok": True, "cancelled": cancelled, "status": entry.status}
+
+
+async def _retry_analysis(entry_id: str, state: "TermFixState") -> dict:
+    entry = state.get_error(entry_id)
+    if entry is None:
+        return {"ok": False, "error": "Entry expired."}
+    if entry.status == "streaming":
+        return {"ok": False, "error": "Analysis is already running."}
+
+    task = state.analysis_tasks.pop(entry_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+    entry.result = None
+    entry.analyzed = False
+    entry.analysis_started = False
+    entry.status = "pending"
+    entry.updated_at = time.time()
+    _start_analysis_task_on_loop(entry, state)
+    await state.notify_ui_update()
+    return {"ok": True, "status": entry.status}
 
 
 def _entry_payload_from_thread(
@@ -1058,6 +1099,7 @@ def _entry_payload_with_handled_state(
             "ok": False,
             "status": "missing",
             "done": True,
+            "can_retry": False,
             "should_close": False,
             "errors": _error_inbox_payload(state, entry_id),
             "body_html": "<p>This TermFix result is no longer available.</p>",
@@ -1077,6 +1119,7 @@ def _entry_payload_with_handled_state(
         "exit_code": entry.exit_code,
         "status": entry.status,
         "done": done,
+        "can_retry": entry.status == "error",
         "should_close": state.consume_popover_close_request(entry_id),
         "updated_at": entry.updated_at,
         "errors": _error_inbox_payload(state, entry.id, entry),
@@ -1338,6 +1381,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
         f"{REDACTION_STATUS_TEXT}: command/output redacted before sending."
     )
     endpoint = json.dumps(_status_endpoint(state, "/state"))
+    retry_endpoint = json.dumps(_status_endpoint(state, "/retry"))
     close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
     close_key = json.dumps(
         _hotkey_letter(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)).lower()
@@ -1348,6 +1392,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     insert_endpoint = json.dumps(
         _status_endpoint(state, "/insert", {"session": getattr(entry, "session_id", "")})
     )
+    retry_hidden = "" if getattr(entry, "status", "") == "error" else " hidden"
 
     return f"""\
 <!DOCTYPE html>
@@ -1546,6 +1591,33 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       overflow-y: auto;
       padding-right: 2px;
     }}
+    .actions {{
+      flex: 0 0 auto;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }}
+    .actions[hidden],
+    button[hidden] {{
+      display: none;
+    }}
+    #retry-button {{
+      min-height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--field);
+      color: var(--ink);
+      font: 700 12px var(--sans);
+      padding: 4px 10px;
+      cursor: pointer;
+    }}
+    #retry-button:disabled {{
+      opacity: 0.55;
+      cursor: default;
+    }}
     .status.streaming::after {{
       content: "";
       display: inline-block;
@@ -1575,8 +1647,12 @@ def _build_live_html(entry, state: "TermFixState") -> str:
   </nav>
 
   <div id="content" class="markdown">{body}</div>
+  <div id="actions" class="actions">
+    <button id="retry-button" type="button"{retry_hidden}>Retry analysis</button>
+  </div>
   <script>
     const endpoint = {endpoint};
+    const retryEndpoint = {retry_endpoint};
     const closeEndpoint = {close_endpoint};
     const initialEntryId = {active_entry_id};
     const insertEndpointBase = {insert_endpoint_base};
@@ -1588,6 +1664,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     const errorListEl = document.getElementById("error-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
+    const retryButton = document.getElementById("retry-button");
     let lastHtml = contentEl.innerHTML;
     let timer = null;
     let pollDelay = 350;
@@ -1604,6 +1681,15 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       }}
       const sep = url.includes("?") ? "&" : "?";
       return url + sep + "session=" + encodeURIComponent(sessionId);
+    }}
+
+    function escapeHtml(text) {{
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
     }}
 
     function sendClosed(entryId) {{
@@ -1704,6 +1790,11 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       statusEl.className = "status " + status;
     }}
 
+    function setRetryVisible(canRetry) {{
+      retryButton.hidden = !canRetry;
+      retryButton.disabled = false;
+    }}
+
     function setActiveEntry(entryId) {{
       if (!entryId || entryId === activeEntryId) {{
         return;
@@ -1746,6 +1837,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
           contentEl.innerHTML = data.body_html;
         }}
         setStatus(data.status);
+        setRetryVisible(Boolean(data.can_retry));
         const nextDelay = data.done ? 2000 : 350;
         if (timer && nextDelay !== pollDelay) {{
           clearInterval(timer);
@@ -1757,7 +1849,39 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       }}
     }}
 
+    async function retryAnalysis() {{
+      if (!activeEntryId || retryButton.disabled) {{
+        return;
+      }}
+      retryButton.disabled = true;
+      setRetryVisible(false);
+      setStatus("pending");
+      lastHtml = "";
+      contentEl.innerHTML = "<p>Analyzing...</p>";
+      try {{
+        const response = await fetch(withEntry(retryEndpoint, activeEntryId), {{
+          method: "POST",
+          cache: "no-store"
+        }});
+        const data = await response.json();
+        if (!data.ok) {{
+          throw new Error(data.error || "Retry failed.");
+        }}
+        if (timer) {{
+          clearInterval(timer);
+        }}
+        pollDelay = 350;
+        timer = setInterval(refresh, pollDelay);
+        refresh();
+      }} catch (error) {{
+        contentEl.innerHTML = "<p>" + escapeHtml(error.message || error) + "</p>";
+        setStatus("error");
+        setRetryVisible(true);
+      }}
+    }}
+
     contentEl.addEventListener("click", handleCodeBlockCopy);
+    retryButton.addEventListener("click", retryAnalysis);
 
     errorListEl.addEventListener("click", (event) => {{
       const item = event.target.closest("[data-entry-id]");
