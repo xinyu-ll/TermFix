@@ -82,7 +82,9 @@ _API_KEY_LABELED_VALUE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _API_KEY_BEARER_RE = re.compile(r"^\s*bearer\s+(.+)$", re.IGNORECASE | re.DOTALL)
-_API_KEY_ENV_VARS = ("TERMFIX_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+_TERMFIX_API_KEY_ENV_VAR = "TERMFIX_API_KEY"
+_DEEPSEEK_API_KEY_ENV_VAR = "DEEPSEEK_API_KEY"
+_OPENAI_API_KEY_ENV_VAR = "OPENAI_API_KEY"
 _CODE_BLOCK_COPY_CSS = _markdown_rendering._CODE_BLOCK_COPY_CSS
 _CODE_BLOCK_COPY_JS = _markdown_rendering._CODE_BLOCK_COPY_JS
 _compact_text = _markdown_rendering._compact_text
@@ -2915,7 +2917,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         previous_api_key_error = getattr(state, "api_key_error", "")
         api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
         if not api_key and not api_key_error:
-            api_key, api_key_error = _api_key_from_env()
+            api_key, api_key_error = _api_key_from_env(
+                getattr(state, "base_url", DEFAULT_BASE_URL)
+            )
         state.api_key = api_key
         state.api_key_error = api_key_error
         if api_key_error and api_key_error != previous_api_key_error:
@@ -2983,9 +2987,20 @@ def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob v
     return api_key, ""
 
 
-def _api_key_from_env() -> tuple[str, str]:
-    """Return the first configured API key environment variable."""
-    for name in _API_KEY_ENV_VARS:
+def _api_key_env_vars_for_base_url(base_url: str) -> tuple[str, ...]:
+    """Return safe environment key fallbacks for the configured provider."""
+    hostname = (urlparse(str(base_url or DEFAULT_BASE_URL)).hostname or "").lower()
+    provider_vars: tuple[str, ...] = ()
+    if hostname == "api.deepseek.com":
+        provider_vars = (_DEEPSEEK_API_KEY_ENV_VAR,)
+    elif hostname == "api.openai.com":
+        provider_vars = (_OPENAI_API_KEY_ENV_VAR,)
+    return (_TERMFIX_API_KEY_ENV_VAR, *provider_vars)
+
+
+def _api_key_from_env(base_url: str = DEFAULT_BASE_URL) -> tuple[str, str]:
+    """Return the first configured API key environment variable safe for base_url."""
+    for name in _api_key_env_vars_for_base_url(base_url):
         api_key, api_key_error = _normalize_api_key(os.environ.get(name, ""))
         if api_key or api_key_error:
             return api_key, api_key_error

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
-from termfixlib.config import DEFAULT_MAX_TOKENS
+from termfixlib.config import DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS
 from termfixlib import markdown as markdown_rendering
 from termfixlib.ui import (
     _CODE_BLOCK_COPY_CSS,
@@ -464,7 +464,7 @@ def test_sync_knobs_uses_environment_api_key_when_knob_is_blank(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "Bearer sk-env")
     state = SimpleNamespace(
-        base_url="old",
+        base_url=DEFAULT_BASE_URL,
         api_key="",
         api_key_error="",
         model="old-model",
@@ -474,6 +474,61 @@ def test_sync_knobs_uses_environment_api_key_when_knob_is_blank(monkeypatch):
     _sync_knobs(state, {"api_key": ""})
 
     assert state.api_key == "sk-env"
+    assert state.api_key_error == ""
+
+
+def test_sync_knobs_ignores_provider_env_keys_for_other_base_urls(monkeypatch):
+    monkeypatch.delenv("TERMFIX_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    state = SimpleNamespace(
+        base_url="https://api.example.com/v1",
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    _sync_knobs(state, {"api_key": ""})
+
+    assert state.api_key == ""
+    assert state.api_key_error == ""
+
+
+def test_sync_knobs_uses_matching_provider_env_key_for_base_url(monkeypatch):
+    monkeypatch.delenv("TERMFIX_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    state = SimpleNamespace(
+        base_url=DEFAULT_BASE_URL,
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    _sync_knobs(state, {"api_key": ""})
+    assert state.api_key == "sk-deepseek"
+
+    state.base_url = "https://api.openai.com/v1"
+    _sync_knobs(state, {"api_key": ""})
+    assert state.api_key == "sk-openai"
+
+
+def test_sync_knobs_prefers_termfix_env_key_over_provider_env_key(monkeypatch):
+    monkeypatch.setenv("TERMFIX_API_KEY", "sk-termfix")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    state = SimpleNamespace(
+        base_url=DEFAULT_BASE_URL,
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+    )
+
+    _sync_knobs(state, {"api_key": ""})
+
+    assert state.api_key == "sk-termfix"
     assert state.api_key_error == ""
 
 
