@@ -4,6 +4,8 @@ import io
 import json
 import logging
 import sys
+import threading
+import time
 import types
 import unittest
 import urllib.error
@@ -77,6 +79,43 @@ class PopoverStatusServerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertFalse(payload["ok"])
         self.assertNotIn("Access-Control-Allow-Origin", headers)
+
+    def test_status_server_initializes_once_across_threads(self) -> None:
+        state = DummyState()
+        created_servers = []
+        real_server = ui.ThreadingHTTPServer
+
+        class _CountingServer(real_server):
+            def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                time.sleep(0.01)
+                super().__init__(*args, **kwargs)
+                created_servers.append(self)
+
+        started = threading.Barrier(8)
+        exceptions = []
+
+        def ensure_server() -> None:
+            try:
+                started.wait(timeout=1)
+                ui._ensure_status_server(state)
+            except Exception as exc:  # pragma: no cover - assertion reports details.
+                exceptions.append(exc)
+
+        threads = [threading.Thread(target=ensure_server) for _ in range(8)]
+        with mock.patch.object(ui, "ThreadingHTTPServer", _CountingServer):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.addCleanup(state.status_server.server_close)
+        self.addCleanup(state.status_server.shutdown)
+
+        self.assertEqual([], exceptions)
+        self.assertEqual(1, len(created_servers))
+        self.assertIs(state.status_server, created_servers[0])
+        self.assertTrue(state.status_server_url)
+        self.assertTrue(state.status_server_token)
 
     def test_cors_allows_only_opaque_popover_origin(self) -> None:
         status, headers, payload = self.request(

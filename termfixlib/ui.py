@@ -62,6 +62,7 @@ _ERROR_INBOX_LIMIT = 10
 _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
 _STATUS_HOTKEY_ERROR = "⚠ Hotkey off"
+_STATUS_SERVER_LOCK_GUARD = threading.Lock()
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset(
     {
@@ -672,6 +673,25 @@ def _status_endpoint(
 
 def _ensure_status_server(state: "TermFixState") -> None:
     """Start a local JSON endpoint for popovers to poll live analysis state."""
+    if state.status_server_url:
+        return
+    with _status_server_init_lock(state):
+        _ensure_status_server_locked(state)
+
+
+def _status_server_init_lock(state: "TermFixState") -> threading.Lock:
+    lock = getattr(state, "status_server_lock", None)
+    if lock is not None:
+        return lock
+    with _STATUS_SERVER_LOCK_GUARD:
+        lock = getattr(state, "status_server_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            state.status_server_lock = lock
+        return lock
+
+
+def _ensure_status_server_locked(state: "TermFixState") -> None:
     if state.status_server_url:
         return
 

@@ -170,6 +170,7 @@ class TermFixState:
         self.connection: Optional[iterm2.Connection] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.status_server = None
+        self.status_server_lock = threading.Lock()
         self.status_server_url: str = ""
         self.status_server_token: str = ""
         self.terminal_sessions: dict[str, iterm2.Session] = {}
