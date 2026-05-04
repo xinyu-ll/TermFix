@@ -346,6 +346,72 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertIn("payload_type=str", output)
         self.assertNotIn(secret_payload, output)
 
+    def test_shell_integration_missing_flag_is_session_scoped(self):
+        state = TermFixState()
+
+        self.assertTrue(state.mark_shell_integration_missing("session-a"))
+        self.assertFalse(state.mark_shell_integration_missing("session-a"))
+        self.assertTrue(state.shell_integration_missing)
+        self.assertIn("session-a", state.shell_integration_missing_sessions)
+
+        self.assertTrue(state.clear_shell_integration_missing("session-a"))
+        self.assertFalse(state.clear_shell_integration_missing("session-a"))
+        self.assertFalse(state.shell_integration_missing)
+
+    def test_session_worker_warns_then_clears_when_command_start_arrives(self):
+        state = TermFixState()
+        notifications = []
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        state.notify_ui_update = notify_ui_update
+
+        class _Mode:
+            COMMAND_START = "start"
+            COMMAND_END = "end"
+
+        class _PromptMonitor:
+            Mode = _Mode
+
+            def __init__(self, connection, session_id, modes):  # noqa: ANN001
+                self.calls = 0
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):  # noqa: ANN001
+                return False
+
+            async def async_get(self):
+                self.calls += 1
+                if self.calls == 1:
+                    await asyncio.sleep(1)
+                if self.calls == 2:
+                    return (_Mode.COMMAND_START, "echo ready")
+                await asyncio.Event().wait()
+
+        fake_iterm2 = types.SimpleNamespace(PromptMonitor=_PromptMonitor)
+        session = types.SimpleNamespace(session_id="session-a")
+
+        async def run_worker() -> None:
+            with mock.patch.object(monitor, "iterm2", fake_iterm2), mock.patch.object(
+                monitor,
+                "SHELL_INTEGRATION_START_TIMEOUT",
+                0.01,
+            ):
+                task = asyncio.create_task(
+                    monitor._session_worker(object(), session, state)
+                )
+                await asyncio.sleep(0.05)
+                task.cancel()
+                await task
+
+        self._main_loop.run_until_complete(run_worker())
+
+        self.assertFalse(state.shell_integration_missing)
+        self.assertEqual(notifications, [True, True])
+
     def test_handle_error_info_log_does_not_include_raw_command(self):
         state = TermFixState()
         session = types.SimpleNamespace(session_id="session-a")

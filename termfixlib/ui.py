@@ -63,6 +63,7 @@ _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
 _STATUS_HOTKEY_ERROR = "⚠ Hotkey off"
 _STATUS_HOTKEY_CONFIG_ERROR = "⚠ Hotkey config"
+_STATUS_SHELL_INTEGRATION_ERROR = "⚠ Shell integration"
 _STATUS_SERVER_LOCK_GUARD = threading.Lock()
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset(
@@ -257,6 +258,8 @@ def _status_badge_text(state: "TermFixState") -> str:
         return _STATUS_HOTKEY_CONFIG_ERROR
     if getattr(state, "hotkey_listener_error", ""):
         return _STATUS_HOTKEY_ERROR
+    if getattr(state, "shell_integration_missing", False):
+        return _STATUS_SHELL_INTEGRATION_ERROR
     if getattr(state, "analyzing", False):
         return "⏳ Analyzing..."
     unhandled_count = getattr(state, "unhandled_error_count", 0)

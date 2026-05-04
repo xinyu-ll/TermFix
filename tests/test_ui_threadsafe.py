@@ -318,6 +318,18 @@ class HotkeyConfigTests(unittest.TestCase):
 
         self.assertEqual(ui._status_badge_text(state), "⚠ Hotkey off")
 
+    def test_status_badge_text_warns_when_shell_integration_missing(self) -> None:
+        state = SimpleNamespace(
+            hotkey_listener_error="",
+            fix_hotkey_error="",
+            prompt_hotkey_error="",
+            shell_integration_missing=True,
+            analyzing=False,
+            unhandled_error_count=0,
+        )
+
+        self.assertEqual(ui._status_badge_text(state), "⚠ Shell integration")
+
     def test_termfix_hotkey_kind_uses_configured_state_hotkeys(self) -> None:
         class _Modifier:
             COMMAND = "command"

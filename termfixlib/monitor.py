@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 PROMPT_HISTORY_VERSION = 2
 ERROR_RETENTION_LIMIT = 100
 HANDLED_ERROR_RETENTION_LIMIT = 20
+SHELL_INTEGRATION_START_TIMEOUT = 30.0
 _PROMPT_CONTEXT_TEXT_LIMIT = 2_000
 _PROMPT_CONTEXT_KEYS = (
     "cwd",
@@ -175,6 +176,7 @@ class TermFixState:
         self.status_server_token: str = ""
         self.terminal_sessions: dict[str, iterm2.Session] = {}
         self.prompt_sessions: dict[str, iterm2.Session] = {}
+        self.shell_integration_missing_sessions: set[str] = set()
         self.popover_last_seen: dict[str, float] = {}
         self.popover_close_requests: set[str] = set()
         self.last_viewed_error_id: str = ""
@@ -344,6 +346,25 @@ class TermFixState:
         with self._state_lock:
             return list(self.prompts)
 
+    @property
+    def shell_integration_missing(self) -> bool:
+        with self._state_lock:
+            return bool(self.shell_integration_missing_sessions)
+
+    def mark_shell_integration_missing(self, session_id: str) -> bool:
+        with self._state_lock:
+            if session_id in self.shell_integration_missing_sessions:
+                return False
+            self.shell_integration_missing_sessions.add(session_id)
+            return True
+
+    def clear_shell_integration_missing(self, session_id: str) -> bool:
+        with self._state_lock:
+            if session_id not in self.shell_integration_missing_sessions:
+                return False
+            self.shell_integration_missing_sessions.discard(session_id)
+            return True
+
     def refresh_analyzing(self) -> None:
         with self._state_lock:
             self.analyzing = any(entry.status == "streaming" for entry in self.errors) or any(
@@ -504,14 +525,25 @@ async def _session_worker(
 
     logger.debug("Worker started for session %s", session_id)
     state.terminal_sessions[session_id] = session
+    saw_command_start = False
+    shell_integration_warning_sent = False
     try:
         async with iterm2.PromptMonitor(connection, session_id, modes=modes) as mon:
             while True:
                 try:
-                    event = await mon.async_get()
+                    if saw_command_start or shell_integration_warning_sent:
+                        event = await mon.async_get()
+                    else:
+                        event = await asyncio.wait_for(
+                            mon.async_get(),
+                            timeout=SHELL_INTEGRATION_START_TIMEOUT,
+                        )
                     mode, payload = _unpack_event(event)
                     _log_prompt_event(session_id, mode, payload)
                     if mode == iterm2.PromptMonitor.Mode.COMMAND_START:
+                        saw_command_start = True
+                        if state.clear_shell_integration_missing(session_id):
+                            await state.notify_ui_update()
                         current_command = payload if isinstance(payload, str) else ""
                         if not current_command:
                             current_command = await _safe_get_variable(session, "command") or ""
@@ -529,6 +561,15 @@ async def _session_worker(
                         current_command = ""
                 except asyncio.CancelledError:
                     raise
+                except asyncio.TimeoutError:
+                    if not saw_command_start:
+                        shell_integration_warning_sent = True
+                        if state.mark_shell_integration_missing(session_id):
+                            logger.warning(
+                                "Shell integration not detected for session %s",
+                                session_id,
+                            )
+                            await state.notify_ui_update()
                 except Exception as exc:
                     logger.error(
                         "Error in session worker %s: %s",
