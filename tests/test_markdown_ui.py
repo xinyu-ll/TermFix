@@ -513,6 +513,41 @@ def test_sync_knobs_updates_settings_and_parses_context_lines():
     assert state.context_lines == 8
 
 
+def test_sync_knobs_accepts_display_name_knob_keys():
+    state = SimpleNamespace(
+        base_url="old",
+        api_key="",
+        api_key_error="",
+        model="old-model",
+        context_lines=12,
+        max_tokens=DEFAULT_MAX_TOKENS,
+        fix_hotkey="Cmd+J",
+        prompt_hotkey="Cmd+L",
+    )
+
+    _sync_knobs(
+        state,
+        {
+            "Base URL": " https://api.example.com ",
+            "API Key": " sk-configured ",
+            "Model": " model-x ",
+            "Context Lines (1-500)": "42",
+            "Max Tokens (1-200000)": "4096",
+            "Fix Hotkey": "Cmd+K",
+            "Prompt Hotkey": "Cmd+P",
+        },
+    )
+
+    assert state.base_url == "https://api.example.com"
+    assert state.api_key == "sk-configured"
+    assert state.api_key_error == ""
+    assert state.model == "model-x"
+    assert state.context_lines == 42
+    assert state.max_tokens == 4096
+    assert state.fix_hotkey == "Cmd+K"
+    assert state.prompt_hotkey == "Cmd+P"
+
+
 def test_sync_knobs_logs_repeated_api_key_validation_error_once(caplog):
     state = SimpleNamespace(
         base_url="old",

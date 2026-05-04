@@ -3284,9 +3284,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
     if not isinstance(knobs, dict):
         return
 
-    if "base_url" in knobs:
+    if _knob_has(knobs, "base_url"):
         base_url, base_url_error = normalize_base_url(
-            knobs.get("base_url", ""),
+            _knob_get(knobs, "base_url", ""),
             getattr(state, "base_url", DEFAULT_BASE_URL),
         )
         state.base_url = base_url
@@ -3294,9 +3294,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if base_url_error:
             logger.warning("Ignoring Base URL setting: %s", base_url_error)
 
-    if "api_key" in knobs:
+    if _knob_has(knobs, "api_key"):
         previous_api_key_error = getattr(state, "api_key_error", "")
-        api_key, api_key_error = _normalize_api_key(knobs.get("api_key", ""))
+        api_key, api_key_error = _normalize_api_key(_knob_get(knobs, "api_key", ""))
         if not api_key and not api_key_error:
             api_key, api_key_error = _api_key_from_env(
                 getattr(state, "base_url", DEFAULT_BASE_URL)
@@ -3306,17 +3306,17 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if api_key_error and api_key_error != previous_api_key_error:
             logger.warning("Ignoring API key setting: %s", api_key_error)
 
-    model = knobs.get("model", "").strip()
+    model = str(_knob_get(knobs, "model", "") or "").strip()
     if model:
         state.model = model
 
-    ctx_raw = knobs.get("context_lines", "").strip()
+    ctx_raw = str(_knob_get(knobs, "context_lines", "") or "").strip()
     if ctx_raw.isdigit():
         state.context_lines = normalize_context_lines(ctx_raw)
 
-    if "max_tokens" in knobs:
+    if _knob_has(knobs, "max_tokens"):
         max_tokens, max_tokens_error = normalize_max_tokens(
-            knobs.get("max_tokens", ""),
+            _knob_get(knobs, "max_tokens", ""),
             getattr(state, "max_tokens", DEFAULT_MAX_TOKENS),
         )
         state.max_tokens = max_tokens
@@ -3324,9 +3324,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if max_tokens_error:
             logger.warning("Ignoring Max Tokens setting: %s", max_tokens_error)
 
-    if "fix_hotkey" in knobs:
+    if _knob_has(knobs, "fix_hotkey"):
         fix_hotkey, fix_hotkey_error = normalize_command_hotkey(
-            knobs.get("fix_hotkey", ""),
+            _knob_get(knobs, "fix_hotkey", ""),
             getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY),
             DEFAULT_FIX_HOTKEY,
         )
@@ -3335,9 +3335,9 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if fix_hotkey_error:
             logger.warning("Ignoring Fix Hotkey setting: %s", fix_hotkey_error)
 
-    if "prompt_hotkey" in knobs:
+    if _knob_has(knobs, "prompt_hotkey"):
         prompt_hotkey, prompt_hotkey_error = normalize_command_hotkey(
-            knobs.get("prompt_hotkey", ""),
+            _knob_get(knobs, "prompt_hotkey", ""),
             getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY),
             DEFAULT_PROMPT_HOTKEY,
         )
@@ -3347,6 +3347,31 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
             logger.warning("Ignoring Prompt Hotkey setting: %s", prompt_hotkey_error)
 
     _validate_hotkey_conflict(state)
+
+
+def _knob_has(knobs: dict, canonical_key: str) -> bool:
+    return _knob_lookup_key(knobs, canonical_key) is not None
+
+
+def _knob_get(knobs: dict, canonical_key: str, default=""):  # noqa: ANN001
+    key = _knob_lookup_key(knobs, canonical_key)
+    if key is None:
+        return default
+    return knobs.get(key, default)
+
+
+def _knob_lookup_key(knobs: dict, canonical_key: str) -> Optional[str]:
+    if canonical_key in knobs:
+        return canonical_key
+    for raw_key in knobs:
+        if _canonical_knob_key(raw_key) == canonical_key:
+            return raw_key
+    return None
+
+
+def _canonical_knob_key(value) -> str:  # noqa: ANN001
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", str(value or "")).strip().lower()
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_")
 
 
 def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob value.
