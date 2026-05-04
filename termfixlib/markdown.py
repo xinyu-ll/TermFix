@@ -15,12 +15,10 @@ _CODE_BLOCK_COPY_CSS = """\
       overflow: hidden;
     }
     .code-actions {
-      position: absolute;
-      top: 7px;
-      right: 7px;
-      z-index: 1;
       display: flex;
+      justify-content: flex-end;
       gap: 5px;
+      padding: 7px 7px 0;
     }
     .code-action {
       height: 24px;
@@ -49,8 +47,7 @@ _CODE_BLOCK_COPY_CSS = """\
     }
     .markdown pre {
       margin: 0;
-      padding: 9px 11px;
-      padding-right: 132px;
+      padding: 8px 11px 9px;
       overflow-x: auto;
       background: #1d1d1b;
     }

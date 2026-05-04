@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import sys
 import types
@@ -58,6 +59,16 @@ def test_markdown_to_html_renders_safe_subset_and_escapes_html():
     assert '<button class="code-action insert-code" type="button" data-insert-code>Insert</button>' in rendered
     assert "echo &#x27;&lt;unsafe&gt;&#x27;" in rendered
     assert "<script>" not in rendered
+
+
+def test_code_block_actions_do_not_overlay_long_code_lines():
+    long_command = "python -m pytest " + "tests/test_markdown_ui.py::test_" + ("x" * 180)
+    rendered = _markdown_to_html(f"```sh\n{long_command}\n```")
+
+    assert html.escape(long_command) in rendered
+    assert "position: absolute;" not in _CODE_BLOCK_COPY_CSS
+    assert "justify-content: flex-end;" in _CODE_BLOCK_COPY_CSS
+    assert "padding-right: 132px;" not in _CODE_BLOCK_COPY_CSS
 
 
 def test_compact_text_removes_markdown_markers_without_destroying_hyphenated_terms():
