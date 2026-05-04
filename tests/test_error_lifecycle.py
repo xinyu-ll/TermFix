@@ -461,6 +461,21 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertTrue(_entry_payload(state, failed.id)["can_retry"])
         self.assertFalse(_entry_payload(state, done.id)["can_retry"])
 
+    def test_state_payload_includes_terminal_context_label(self):
+        state = TermFixState()
+        pending = _entry("session-a", "git push")
+        pending.context = {
+            "terminal_output_line_count": 50,
+            "shell": "zsh",
+            "os_name": "macOS",
+            "os_version": "14.5",
+        }
+        state.errors.append(pending)
+
+        payload = _entry_payload(state, pending.id)
+
+        self.assertEqual(payload["context_label"], "50 lines context · zsh · macOS 14.5")
+
     def test_state_payload_includes_error_inbox_with_active_entry(self):
         state = TermFixState()
         handled = _entry("session-a", "old failure", handled=True)

@@ -633,6 +633,37 @@ def _error_inbox_to_html(
     return "\n".join(blocks)
 
 
+def _error_context_label(entry) -> str:  # noqa: ANN001 - accepts ErrorEntry-like test doubles.
+    context = getattr(entry, "context", {}) or {}
+    if not isinstance(context, dict):
+        context = {}
+
+    parts: list[str] = []
+    line_count = context.get("terminal_output_line_count") or context.get("context_lines")
+    if line_count is None and context.get("terminal_output") is not None:
+        output = str(context.get("terminal_output") or "")
+        line_count = len(output.splitlines()) if output else 0
+    try:
+        line_count_int = int(line_count)
+    except (TypeError, ValueError):
+        line_count_int = 0
+    if line_count_int > 0:
+        unit = "line" if line_count_int == 1 else "lines"
+        parts.append(f"{line_count_int} {unit} context")
+
+    shell = str(context.get("shell") or "").strip()
+    if shell:
+        parts.append(shell)
+
+    os_name = str(context.get("os_name") or "").strip()
+    os_version = str(context.get("os_version") or "").strip()
+    os_label = " ".join(part for part in (os_name, os_version) if part)
+    if os_label:
+        parts.append(os_label)
+
+    return " · ".join(parts)
+
+
 def _maybe_start_error_analysis(entry, state: "TermFixState") -> None:  # noqa: ANN001
     if getattr(entry, "analysis_started", False):
         return
@@ -1154,6 +1185,7 @@ def _entry_payload_with_handled_state(
         "session_id": entry.session_id,
         "command": entry.command or "(unknown command)",
         "exit_code": entry.exit_code,
+        "context_label": _error_context_label(entry),
         "status": entry.status,
         "done": done,
         "can_retry": entry.status == "error",
@@ -1412,6 +1444,8 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     _ensure_status_server(state)
     failed_cmd = html.escape(entry.command or "(unknown command)")
     exit_code = entry.exit_code
+    context_label = html.escape(_error_context_label(entry))
+    context_hidden = "" if context_label else " hidden"
     body = _markdown_to_html(entry.result or "Analyzing...")
     inbox = _error_inbox_to_html(state, entry.id, entry)
     redaction_note = html.escape(
@@ -1541,6 +1575,20 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       background: var(--field);
       border-radius: 4px;
       padding: 1px 6px;
+    }}
+    .context-label {{
+      min-width: 0;
+      max-width: 180px;
+      overflow: hidden;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 650;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .context-label[hidden] {{
+      display: none;
     }}
     .status {{
       flex: 0 0 auto;
@@ -1689,6 +1737,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     <h1>TermFix</h1>
     <span id="failed-cmd" class="failed-cmd">{failed_cmd}</span>
     <span id="exit-code" class="badge">exit {exit_code}</span>
+    <span id="context-label" class="context-label"{context_hidden}>{context_label}</span>
     <button id="dismiss-button" class="dismiss-button" type="button">Ignore</button>
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
@@ -1715,6 +1764,7 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     let insertEndpoint = {insert_endpoint};
     const commandEl = document.getElementById("failed-cmd");
     const exitEl = document.getElementById("exit-code");
+    const contextLabelEl = document.getElementById("context-label");
     const errorListEl = document.getElementById("error-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
@@ -1885,6 +1935,10 @@ def _build_live_html(entry, state: "TermFixState") -> str:
         }}
         if (Object.prototype.hasOwnProperty.call(data, "exit_code")) {{
           exitEl.textContent = "exit " + data.exit_code;
+        }}
+        if (Object.prototype.hasOwnProperty.call(data, "context_label")) {{
+          contextLabelEl.textContent = data.context_label || "";
+          contextLabelEl.hidden = !data.context_label;
         }}
         renderErrorInbox(data.errors);
         if (data.body_html && data.body_html !== lastHtml) {{

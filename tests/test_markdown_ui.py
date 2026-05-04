@@ -277,6 +277,36 @@ def test_live_popover_includes_retry_control_for_error_state():
     assert 'fetch(withEntry(retryEndpoint, activeEntryId), {' in live_html
 
 
+def test_live_popover_shows_terminal_context_metadata():
+    state = SimpleNamespace(
+        status_server_url="http://127.0.0.1:9",
+        status_server_token="test-token",
+        prompts=[],
+        context_lines=12,
+    )
+    live_entry = SimpleNamespace(
+        id="error-1",
+        session_id="session-1",
+        command="git push",
+        exit_code=128,
+        result="Analyzing...",
+        status="streaming",
+        handled=False,
+        context={
+            "terminal_output_line_count": 50,
+            "shell": "zsh",
+            "os_name": "macOS",
+            "os_version": "14.5",
+        },
+    )
+
+    live_html = _build_live_html(live_entry, state)
+
+    assert '<span id="context-label" class="context-label">50 lines context · zsh · macOS 14.5</span>' in live_html
+    assert 'const contextLabelEl = document.getElementById("context-label");' in live_html
+    assert 'Object.prototype.hasOwnProperty.call(data, "context_label")' in live_html
+
+
 def test_prompt_context_label_mentions_redaction_status():
     entry = SimpleNamespace(session_id="session-1", context={"context_lines": 8}, messages=[])
     state = SimpleNamespace(context_lines=12)
