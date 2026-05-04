@@ -71,9 +71,21 @@ logging.basicConfig(
 logger = logging.getLogger("termfix")
 
 
+def _install_metadata() -> str:
+    """Return install metadata written by setup.sh when available."""
+    try:
+        from termfixlib import _installed
+    except Exception:
+        return "source=unknown"
+
+    version = getattr(_installed, "VERSION", "unknown")
+    source_root = getattr(_installed, "SOURCE_ROOT", "unknown")
+    return f"version={version} source={source_root}"
+
+
 async def main(connection: iterm2.Connection) -> None:
     """Register the status bar component and enter the monitoring loop."""
-    logger.info("TermFix starting")
+    logger.info("TermFix starting — script=%s %s", __file__, _install_metadata())
 
     app = await iterm2.async_get_app(connection)
     state = await register_status_bar(connection, app)
