@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 def _install_iterm2_stub() -> None:
@@ -327,6 +328,47 @@ class PromptHistoryTests(unittest.TestCase):
         self.assertIsNone(restored.session)
         self.assertEqual(empty.session_id, "current-session")
         self.assertIs(empty.session, session)
+
+    def test_prompt_hotkey_tracks_open_popovers_per_session(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        state = TermFixState()
+        opened_sessions = []
+
+        class _App:
+            def get_session_by_id(self, session_id):  # noqa: ANN001
+                return types.SimpleNamespace(session_id=session_id)
+
+        async def _open_popover(connection, session_id, state, html, size=None):  # noqa: ANN001
+            opened_sessions.append(session_id)
+
+        with mock.patch.object(ui, "_build_prompt_html", return_value="<html>"), mock.patch.object(
+            ui,
+            "_open_popover",
+            side_effect=_open_popover,
+        ), mock.patch.object(
+            ui.iterm2,
+            "Size",
+            lambda width, height: (width, height),
+            create=True,
+        ):
+            self._main_loop.run_until_complete(
+                ui._handle_prompt_hotkey(object(), _App(), "session-a", state)
+            )
+            self._main_loop.run_until_complete(
+                ui._handle_prompt_hotkey(object(), _App(), "session-b", state)
+            )
+            self._main_loop.run_until_complete(
+                ui._handle_prompt_hotkey(object(), _App(), "session-a", state)
+            )
+
+        session_a_popover = ui._prompt_popover_id("session-a")
+        session_b_popover = ui._prompt_popover_id("session-b")
+        self.assertIn(session_a_popover, state.popover_last_seen)
+        self.assertIn(session_b_popover, state.popover_last_seen)
+        self.assertIn(session_a_popover, state.popover_close_requests)
+        self.assertNotIn(session_b_popover, state.popover_close_requests)
+        self.assertEqual(opened_sessions, ["session-a", "session-b"])
 
     def test_resume_prompt_binds_only_selected_restored_entry(self):
         history_path = self.tmp_path / "prompt_history.json"

@@ -95,6 +95,10 @@ _markdown_to_html = _markdown_rendering._markdown_to_html
 _plain_text_to_html = _markdown_rendering._plain_text_to_html
 
 
+def _prompt_popover_id(session_id: str) -> str:
+    return f"{_PROMPT_POPOVER_ID}:{session_id}" if session_id else _PROMPT_POPOVER_ID
+
+
 def _popover_cors_origin(origin: str) -> Optional[str]:
     """Return the CORS origin accepted for iTerm's opaque popover document."""
     if origin == _POPOVER_CORS_ORIGIN:
@@ -298,9 +302,10 @@ async def _handle_prompt_hotkey(
     if not session_id:
         return
 
-    if state.is_popover_open(_PROMPT_POPOVER_ID):
-        state.request_popover_close(_PROMPT_POPOVER_ID)
-        logger.info("TermFix prompt popover close requested")
+    prompt_popover_id = _prompt_popover_id(session_id)
+    if state.is_popover_open(prompt_popover_id):
+        state.request_popover_close(prompt_popover_id)
+        logger.info("TermFix prompt popover close requested — session=%s", session_id)
         return
 
     session = app.get_session_by_id(session_id)
@@ -319,7 +324,7 @@ async def _handle_prompt_hotkey(
             _build_prompt_html(entry, state),
             size=iterm2.Size(PROMPT_POPOVER_WIDTH, PROMPT_POPOVER_HEIGHT),
         )
-        state.mark_popover_seen(_PROMPT_POPOVER_ID)
+        state.mark_popover_seen(prompt_popover_id)
         state.mark_popover_seen(entry.id)
     except Exception as exc:
         logger.error("Failed to open prompt popover: %s", exc, exc_info=True)
@@ -882,8 +887,9 @@ def _mark_popover_closed_from_thread(state: "TermFixState", entry_id: str) -> di
 async def _mark_popover_closed(entry_id: str, state: "TermFixState") -> dict:
     handled_error = False
     if entry_id:
-        if state.get_prompt(entry_id) is not None:
-            state.mark_popover_closed(_PROMPT_POPOVER_ID)
+        prompt_entry = state.get_prompt(entry_id)
+        if prompt_entry is not None:
+            state.mark_popover_closed(_prompt_popover_id(prompt_entry.session_id))
         else:
             handled_error = state.mark_error_handled(entry_id)
         state.mark_popover_closed(entry_id)
@@ -993,7 +999,8 @@ def _entry_payload_with_handled_state(
 
     prompt_entry = state.get_prompt(entry_id)
     if prompt_entry is not None:
-        state.mark_popover_seen(_PROMPT_POPOVER_ID)
+        prompt_popover_id = _prompt_popover_id(popover_session_id or prompt_entry.session_id)
+        state.mark_popover_seen(prompt_popover_id)
         state.mark_popover_seen(entry_id)
         done = prompt_entry.status in ("done", "error", "cancelled")
         return {
@@ -1003,7 +1010,7 @@ def _entry_payload_with_handled_state(
             "status": prompt_entry.status,
             "done": done,
             "should_close": (
-                state.consume_popover_close_request(_PROMPT_POPOVER_ID)
+                state.consume_popover_close_request(prompt_popover_id)
                 or state.consume_popover_close_request(entry_id)
             ),
             "updated_at": prompt_entry.updated_at,
@@ -1174,7 +1181,7 @@ async def _create_prompt_entry(
         session=current.session or state.prompt_sessions.get(session_id),
     )
     await state.add_prompt(entry)
-    state.mark_popover_seen(_PROMPT_POPOVER_ID)
+    state.mark_popover_seen(_prompt_popover_id(session_id))
     state.mark_popover_seen(entry.id)
     return {"ok": True, "entry_id": entry.id}
 
