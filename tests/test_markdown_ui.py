@@ -460,6 +460,8 @@ def test_sync_knobs_preserves_api_key_when_knob_payload_omits_it():
 
 
 def test_sync_knobs_uses_environment_api_key_when_knob_is_blank(monkeypatch):
+    monkeypatch.delenv("TERMFIX_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "Bearer sk-env")
     state = SimpleNamespace(
         base_url="old",
