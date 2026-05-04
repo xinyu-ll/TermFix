@@ -190,8 +190,9 @@ class TermFixState:
 
     async def add_prompt(self, entry: PromptEntry) -> None:
         async with self._lock:
-            self.prompts.append(entry)
-            self._trim_prompt_history()
+            with self._state_lock:
+                self.prompts.append(entry)
+                self._trim_prompt_history()
 
     @property
     def error_count(self) -> int:
@@ -319,19 +320,27 @@ class TermFixState:
             return True
 
     def latest_prompt(self, session_id: str) -> Optional[PromptEntry]:
-        for entry in reversed(self.prompts):
-            if entry.session_id == session_id:
-                return entry
+        with self._state_lock:
+            for entry in reversed(self.prompts):
+                if entry.session_id == session_id:
+                    return entry
         return None
 
     def latest_prompt_any(self) -> Optional[PromptEntry]:
-        return self.prompts[-1] if self.prompts else None
+        with self._state_lock:
+            return self.prompts[-1] if self.prompts else None
 
     def get_prompt(self, entry_id: str) -> Optional[PromptEntry]:
-        for entry in self.prompts:
-            if entry.id == entry_id:
-                return entry
+        with self._state_lock:
+            for entry in self.prompts:
+                if entry.id == entry_id:
+                    return entry
         return None
+
+    def prompt_entries(self) -> list[PromptEntry]:
+        """Return a stable snapshot of retained prompt entries."""
+        with self._state_lock:
+            return list(self.prompts)
 
     def refresh_analyzing(self) -> None:
         with self._state_lock:
@@ -343,19 +352,20 @@ class TermFixState:
         """Persist prompt conversations to a fixed on-disk JSON file."""
         self._trim_prompt_history()
         records = []
-        for entry in self.prompts:
-            if not entry.messages:
-                continue
-            records.append(
-                {
-                    "id": entry.id,
-                    "timestamp": entry.timestamp,
-                    "updated_at": entry.updated_at,
-                    "source_session_id": entry.session_id or entry.source_session_id,
-                    "context": _serializable_context(entry.context),
-                    "messages": _serializable_messages(entry.messages),
-                }
-            )
+        with self._state_lock:
+            for entry in self.prompts:
+                if not entry.messages:
+                    continue
+                records.append(
+                    {
+                        "id": entry.id,
+                        "timestamp": entry.timestamp,
+                        "updated_at": entry.updated_at,
+                        "source_session_id": entry.session_id or entry.source_session_id,
+                        "context": _serializable_context(entry.context),
+                        "messages": _serializable_messages(entry.messages),
+                    }
+                )
 
         try:
             os.makedirs(os.path.dirname(PROMPT_HISTORY_PATH), exist_ok=True)
@@ -413,9 +423,10 @@ class TermFixState:
         return entries[-PROMPT_HISTORY_LIMIT:]
 
     def _trim_prompt_history(self) -> None:
-        if len(self.prompts) <= PROMPT_HISTORY_LIMIT:
-            return
-        self.prompts = self.prompts[-PROMPT_HISTORY_LIMIT:]
+        with self._state_lock:
+            if len(self.prompts) <= PROMPT_HISTORY_LIMIT:
+                return
+            self.prompts = self.prompts[-PROMPT_HISTORY_LIMIT:]
 
     def mark_popover_seen(self, entry_id: str) -> None:
         with self._state_lock:

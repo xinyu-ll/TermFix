@@ -337,7 +337,7 @@ def _attach_prompt_history_to_session(
     session,
 ) -> None:
     """Attach only live empty placeholders; restored history stays detached."""
-    for entry in state.prompts:
+    for entry in _prompt_entries_snapshot(state):
         if entry.status == "input" and not entry.messages and not entry.session_id:
             entry.session_id = session_id
             entry.session = session
@@ -3015,7 +3015,7 @@ def _prompt_history_to_html(
     """Render current-session history plus detached restored conversations."""
     entries = [
         entry
-        for entry in state.prompts
+        for entry in _prompt_entries_snapshot(state)
         if entry.messages
         and (entry.session_id == session_id or _is_detached_prompt(entry))
     ]
@@ -3053,6 +3053,13 @@ def _prompt_history_to_html(
             "</button>"
         )
     return "\n".join(blocks)
+
+
+def _prompt_entries_snapshot(state: "TermFixState") -> list[PromptEntry]:
+    prompt_entries = getattr(state, "prompt_entries", None)
+    if callable(prompt_entries):
+        return list(prompt_entries())
+    return list(getattr(state, "prompts", []) or [])
 
 
 def _is_detached_prompt(entry: PromptEntry) -> bool:

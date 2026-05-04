@@ -73,6 +73,52 @@ class PromptHistoryTests(unittest.TestCase):
     def _set_history_path(self, path: Path) -> None:
         monitor.PROMPT_HISTORY_PATH = str(path)
 
+    def test_prompt_list_access_uses_state_lock(self):
+        history_path = self.tmp_path / "prompt_history.json"
+        self._set_history_path(history_path)
+        monitor.PROMPT_HISTORY_LIMIT = 1
+        state = TermFixState()
+        entry = PromptEntry(
+            session_id="session-a",
+            context={},
+            id="kept",
+            messages=[{"role": "user", "content": "question"}],
+        )
+        state.prompts = [entry]
+
+        class TrackingLock:
+            def __init__(self) -> None:
+                self.entries = 0
+
+            def __enter__(self):
+                self.entries += 1
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):  # noqa: ANN001
+                return False
+
+        tracking_lock = TrackingLock()
+        state._state_lock = tracking_lock
+
+        self.assertIs(state.latest_prompt("session-a"), entry)
+        self.assertIs(state.latest_prompt_any(), entry)
+        self.assertIs(state.get_prompt("kept"), entry)
+        self.assertEqual(state.prompt_entries(), [entry])
+        self._main_loop.run_until_complete(
+            state.add_prompt(
+                PromptEntry(
+                    session_id="session-a",
+                    context={},
+                    id="newest",
+                    messages=[{"role": "user", "content": "new"}],
+                )
+            )
+        )
+        state.save_prompt_history()
+
+        self.assertGreaterEqual(tracking_lock.entries, 7)
+        self.assertEqual([prompt.id for prompt in state.prompts], ["newest"])
+
     def test_prompt_history_filters_messages_and_trims_limit(self):
         history_path = self.tmp_path / "prompt_history.json"
         self._set_history_path(history_path)
