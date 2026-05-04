@@ -870,12 +870,15 @@ def _mark_popover_closed_from_thread(state: "TermFixState", entry_id: str) -> di
 
 
 async def _mark_popover_closed(entry_id: str, state: "TermFixState") -> dict:
+    handled_error = False
     if entry_id:
         if state.get_prompt(entry_id) is not None:
             state.mark_popover_closed(_PROMPT_POPOVER_ID)
         else:
-            _mark_error_handled_from_thread(state, entry_id)
+            handled_error = state.mark_error_handled(entry_id)
         state.mark_popover_closed(entry_id)
+    if handled_error:
+        await state.notify_ui_update()
     return {"ok": True}
 
 
@@ -934,12 +937,15 @@ async def _entry_payload_on_loop(
     popover_session_id: str = "",
     start_analysis: bool = False,
 ) -> dict:
-    return _entry_payload(
+    payload, handled_error = _entry_payload_with_handled_state(
         state,
         entry_id,
         popover_session_id,
         start_analysis=start_analysis,
     )
+    if handled_error:
+        await state.notify_ui_update()
+    return payload
 
 
 def _entry_payload(
@@ -948,6 +954,23 @@ def _entry_payload(
     popover_session_id: str = "",
     start_analysis: bool = False,
 ) -> dict:
+    payload, handled_error = _entry_payload_with_handled_state(
+        state,
+        entry_id,
+        popover_session_id,
+        start_analysis=start_analysis,
+    )
+    if handled_error:
+        _notify_ui_update_from_thread(state)
+    return payload
+
+
+def _entry_payload_with_handled_state(
+    state: "TermFixState",
+    entry_id: str,
+    popover_session_id: str = "",
+    start_analysis: bool = False,
+) -> tuple[dict, bool]:
     """Return a JSON-safe snapshot of the current analysis state."""
     if entry_id == _INFO_POPOVER_ID:
         state.mark_popover_seen(entry_id)
@@ -956,7 +979,7 @@ def _entry_payload(
             "status": "info",
             "done": False,
             "should_close": state.consume_popover_close_request(entry_id),
-        }
+        }, False
 
     prompt_entry = state.get_prompt(entry_id)
     if prompt_entry is not None:
@@ -990,7 +1013,7 @@ def _entry_payload(
                 prompt_entry.result or "",
                 prompt_entry.context,
             ),
-        }
+        }, False
 
     entry = state.get_error(entry_id)
     if entry is None:
@@ -1001,11 +1024,11 @@ def _entry_payload(
             "should_close": False,
             "errors": _error_inbox_payload(state, entry_id),
             "body_html": "<p>This TermFix result is no longer available.</p>",
-        }
+        }, False
 
     if start_analysis:
         _maybe_start_error_analysis(entry, state)
-    _mark_error_handled_from_thread(state, entry_id)
+    handled_error = state.mark_error_handled(entry_id)
     state.mark_popover_seen(entry_id)
     markdown = entry.result or "Analyzing..."
     done = entry.status in ("done", "error", "cancelled")
@@ -1021,7 +1044,7 @@ def _entry_payload(
         "updated_at": entry.updated_at,
         "errors": _error_inbox_payload(state, entry.id, entry),
         "body_html": _markdown_to_html(markdown),
-    }
+    }, handled_error
 
 
 def _submit_prompt_from_thread(

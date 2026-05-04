@@ -9,12 +9,14 @@ from unittest import mock
 
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
-from termfixlib import monitor
+from termfixlib import monitor, ui
 from termfixlib.monitor import ErrorEntry, PromptEntry, TermFixState
 from termfixlib.ui import (
     _cancel_analysis,
     _ensure_status_server,
     _entry_payload,
+    _entry_payload_on_loop,
+    _mark_popover_closed,
     _pick_entry,
     _status_endpoint,
 )
@@ -418,3 +420,55 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertEqual(_pick_entry(state, "session-a"), pending)
         self.assertNotIn(pending.id, state.popover_last_seen)
         self.assertNotIn(pending.id, state.popover_close_requests)
+
+    def test_entry_payload_on_loop_marks_handled_without_thread_scheduler(self):
+        state = TermFixState()
+        pending = _entry("session-a", "pytest")
+        pending.result = "Focused fix."
+        pending.status = "done"
+        state.errors.append(pending)
+        notifications = []
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        state.notify_ui_update = notify_ui_update
+
+        with mock.patch.object(
+            ui,
+            "_notify_ui_update_from_thread",
+            side_effect=AssertionError("loop path should not schedule from thread"),
+        ):
+            payload = self._main_loop.run_until_complete(
+                _entry_payload_on_loop(pending.id, state)
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(pending.handled)
+        self.assertEqual(notifications, [True])
+
+    def test_mark_popover_closed_on_loop_marks_handled_without_thread_scheduler(self):
+        state = TermFixState()
+        pending = _entry("session-a", "pytest")
+        state.errors.append(pending)
+        state.mark_popover_seen(pending.id)
+        notifications = []
+
+        async def notify_ui_update() -> None:
+            notifications.append(True)
+
+        state.notify_ui_update = notify_ui_update
+
+        with mock.patch.object(
+            ui,
+            "_notify_ui_update_from_thread",
+            side_effect=AssertionError("loop path should not schedule from thread"),
+        ):
+            payload = self._main_loop.run_until_complete(
+                _mark_popover_closed(pending.id, state)
+            )
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertTrue(pending.handled)
+        self.assertEqual(notifications, [True])
+        self.assertNotIn(pending.id, state.popover_last_seen)
