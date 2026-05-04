@@ -19,6 +19,7 @@ from termfixlib.ui import (
     _insert_code_text,
     _markdown_to_html,
     _prompt_context_label,
+    _status_badge_text,
     _sync_knobs,
 )
 
@@ -587,6 +588,36 @@ def test_sync_knobs_preserves_previous_values_for_invalid_runtime_config():
     assert state.fix_hotkey_error == "Hotkey must be Command plus one ANSI letter, such as Cmd+J."
     assert state.prompt_hotkey == "Cmd+P"
     assert state.prompt_hotkey_error == "Hotkey must be Command plus one ANSI letter, such as Cmd+J."
+
+
+def test_sync_knobs_flags_hotkey_conflicts_and_clears_after_change():
+    state = SimpleNamespace(
+        base_url="https://api.example.com/v1",
+        api_key="",
+        model="model-x",
+        context_lines=12,
+        max_tokens=4096,
+        fix_hotkey="Cmd+J",
+        fix_hotkey_error="",
+        prompt_hotkey="Cmd+L",
+        prompt_hotkey_error="",
+        analyzing=False,
+        unhandled_error_count=0,
+    )
+
+    _sync_knobs(state, {"fix_hotkey": "Cmd+J", "prompt_hotkey": "Cmd+J"})
+
+    assert state.fix_hotkey == "Cmd+J"
+    assert state.prompt_hotkey == "Cmd+J"
+    assert state.fix_hotkey_error == "Fix Hotkey conflicts with Prompt Hotkey (Cmd+J)."
+    assert state.prompt_hotkey_error == "Prompt Hotkey conflicts with Fix Hotkey (Cmd+J)."
+    assert _status_badge_text(state) == "⚠ Hotkey config"
+
+    _sync_knobs(state, {"prompt_hotkey": "Cmd+L"})
+
+    assert state.prompt_hotkey == "Cmd+L"
+    assert state.fix_hotkey_error == ""
+    assert state.prompt_hotkey_error == ""
 
 
 def test_info_popover_exposes_validation_errors_and_current_knobs():

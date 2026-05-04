@@ -62,6 +62,7 @@ _ERROR_INBOX_LIMIT = 10
 _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
 _STATUS_HOTKEY_ERROR = "⚠ Hotkey off"
+_STATUS_HOTKEY_CONFIG_ERROR = "⚠ Hotkey config"
 _STATUS_SERVER_LOCK_GUARD = threading.Lock()
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset(
@@ -251,6 +252,8 @@ async def start_hotkey_listener(
 
 
 def _status_badge_text(state: "TermFixState") -> str:
+    if getattr(state, "fix_hotkey_error", "") or getattr(state, "prompt_hotkey_error", ""):
+        return _STATUS_HOTKEY_CONFIG_ERROR
     if getattr(state, "hotkey_listener_error", ""):
         return _STATUS_HOTKEY_ERROR
     if getattr(state, "analyzing", False):
@@ -3149,6 +3152,8 @@ def _sync_knobs(state: "TermFixState", knobs: dict) -> None:
         if prompt_hotkey_error:
             logger.warning("Ignoring Prompt Hotkey setting: %s", prompt_hotkey_error)
 
+    _validate_hotkey_conflict(state)
+
 
 def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob value.
     """Return a stripped API key or a user-readable validation error."""
@@ -3169,6 +3174,28 @@ def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob v
     if any(char.isspace() for char in api_key):
         return "", "API key contains internal whitespace; paste only the key."
     return api_key, ""
+
+
+def _is_hotkey_conflict_error(error: str) -> bool:
+    return "conflicts with" in str(error or "")
+
+
+def _validate_hotkey_conflict(state: "TermFixState") -> None:
+    if _is_hotkey_conflict_error(getattr(state, "fix_hotkey_error", "")):
+        state.fix_hotkey_error = ""
+    if _is_hotkey_conflict_error(getattr(state, "prompt_hotkey_error", "")):
+        state.prompt_hotkey_error = ""
+
+    if getattr(state, "fix_hotkey_error", "") or getattr(state, "prompt_hotkey_error", ""):
+        return
+
+    fix_hotkey = getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)
+    prompt_hotkey = getattr(state, "prompt_hotkey", DEFAULT_PROMPT_HOTKEY)
+    if _hotkey_letter(fix_hotkey) != _hotkey_letter(prompt_hotkey):
+        return
+
+    state.fix_hotkey_error = f"Fix Hotkey conflicts with Prompt Hotkey ({prompt_hotkey})."
+    state.prompt_hotkey_error = f"Prompt Hotkey conflicts with Fix Hotkey ({fix_hotkey})."
 
 
 def _api_key_env_vars_for_base_url(base_url: str) -> tuple[str, ...]:
