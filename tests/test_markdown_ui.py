@@ -508,6 +508,21 @@ def test_sync_knobs_updates_settings_and_parses_context_lines():
     assert state.api_key == "sk-auth"
     assert state.api_key_error == ""
 
+    _sync_knobs(state, {"api_key": "DeepSeek API Key: sk-deepseek"})
+
+    assert state.api_key == "sk-deepseek"
+    assert state.api_key_error == ""
+
+    _sync_knobs(state, {"api_key": 'export DEEPSEEK_API_KEY="sk-exported"'})
+
+    assert state.api_key == "sk-exported"
+    assert state.api_key_error == ""
+
+    _sync_knobs(state, {"api_key": "OPENAI_API_KEY='sk-openai'"})
+
+    assert state.api_key == "sk-openai"
+    assert state.api_key_error == ""
+
     _sync_knobs(state, {"context_lines": "not-a-number"})
 
     assert state.context_lines == 8

@@ -79,12 +79,13 @@ _POPOVER_ROUTES = frozenset(
         "/test-connection",
     }
 )
+_API_KEY_NAME_PATTERN = r"(?:(?:termfix|deepseek|openai)[_\s-]+)?api[_\s-]*key"
 _API_KEY_LABEL_RE = re.compile(
-    r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|bearer|token)\s*[:=]",
+    rf"^\s*(?:export\s+)?(?:{_API_KEY_NAME_PATTERN}|authorization|bearer|token)\s*[:=]",
     re.IGNORECASE,
 )
 _API_KEY_LABELED_VALUE_RE = re.compile(
-    r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|token)\s*[:=]\s*(.+)$",
+    rf"^\s*(?:export\s+)?(?:{_API_KEY_NAME_PATTERN}|authorization|bearer|token)\s*[:=]\s*(.+)$",
     re.IGNORECASE | re.DOTALL,
 )
 _API_KEY_BEARER_RE = re.compile(r"^\s*bearer\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -3376,23 +3377,30 @@ def _canonical_knob_key(value) -> str:  # noqa: ANN001
 
 def _normalize_api_key(value) -> tuple[str, str]:  # noqa: ANN001 - iTerm knob value.
     """Return a stripped API key or a user-readable validation error."""
-    api_key = str(value or "").strip()
+    api_key = _strip_api_key_wrapping(str(value or ""))
     if not api_key:
         return "", ""
 
     labeled_match = _API_KEY_LABELED_VALUE_RE.match(api_key)
     if labeled_match:
-        api_key = labeled_match.group(1).strip()
+        api_key = _strip_api_key_wrapping(labeled_match.group(1))
 
     bearer_match = _API_KEY_BEARER_RE.match(api_key)
     if bearer_match:
-        api_key = bearer_match.group(1).strip()
+        api_key = _strip_api_key_wrapping(bearer_match.group(1))
 
     if _API_KEY_LABEL_RE.search(api_key):
         return "", "Remove label text such as 'API Key:' and paste only the key."
     if any(char.isspace() for char in api_key):
         return "", "API key contains internal whitespace; paste only the key."
     return api_key, ""
+
+
+def _strip_api_key_wrapping(value: str) -> str:
+    api_key = value.strip()
+    if len(api_key) >= 2 and api_key[0] == api_key[-1] and api_key[0] in {"'", '"'}:
+        return api_key[1:-1].strip()
+    return api_key
 
 
 def _is_hotkey_conflict_error(error: str) -> bool:
