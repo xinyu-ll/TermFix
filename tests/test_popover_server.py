@@ -8,6 +8,7 @@ import types
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
@@ -22,6 +23,9 @@ class DummyState:
         self.loop = None
         self.seen: list[str] = []
         self.closed: list[str] = []
+        self.api_key = ""
+        self.base_url = "https://api.example.test"
+        self.model = "model-x"
 
     def get_prompt(self, entry_id: str):
         return None
@@ -110,6 +114,50 @@ class PopoverStatusServerTests(unittest.TestCase):
             logger.setLevel(old_level)
 
         self.assertNotIn(self.state.status_server_token, stream.getvalue())
+
+    def test_test_connection_endpoint_reports_missing_api_key_without_provider_call(self) -> None:
+        with mock.patch.object(ui, "check_provider_connection") as provider_test:
+            status, headers, payload = self.request(
+                self.token_path("/test-connection"),
+                origin="null",
+                method="POST",
+            )
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["kind"], "missing_api_key")
+        self.assertIn("API key", payload["error"])
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
+        provider_test.assert_not_called()
+
+    def test_test_connection_endpoint_returns_provider_payload_without_exposing_key(self) -> None:
+        self.state.api_key = "sk-secret"
+        calls = []
+
+        def fake_provider_test(api_key, base_url, model):  # noqa: ANN001
+            calls.append((api_key, base_url, model))
+            return {
+                "ok": True,
+                "message": "Connection succeeded.",
+                "base_url": base_url,
+                "model": model,
+            }
+
+        with mock.patch.object(ui, "check_provider_connection", side_effect=fake_provider_test):
+            status, headers, payload = self.request(
+                self.token_path("/test-connection"),
+                origin="null",
+                method="POST",
+            )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["message"], "Connection succeeded.")
+        self.assertEqual(payload["base_url"], "https://api.example.test")
+        self.assertEqual(payload["model"], "model-x")
+        self.assertEqual(headers["Access-Control-Allow-Origin"], "null")
+        self.assertEqual(calls, [("sk-secret", "https://api.example.test", "model-x")])
+        self.assertNotIn("sk-secret", json.dumps(payload))
 
 
 if __name__ == "__main__":

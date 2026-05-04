@@ -324,6 +324,63 @@ class ErrorLifecycleTest(unittest.TestCase):
         self.assertTrue(pending.handled)
         self.assertIsNotNone(pending.handled_at)
 
+    def test_state_payload_includes_error_inbox_with_active_entry(self):
+        state = TermFixState()
+        handled = _entry("session-a", "old failure", handled=True)
+        handled.result = "Old result"
+        handled.status = "done"
+        other = _entry("session-b", "npm test")
+        other.result = "Other result"
+        other.status = "done"
+        active = _entry("session-a", "pytest tests/test_error_lifecycle.py")
+        active.result = "Active result"
+        active.status = "done"
+        state.errors.extend([handled, other, active])
+
+        payload = _entry_payload(state, active.id)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["entry_id"], active.id)
+        self.assertEqual(payload["command"], "pytest tests/test_error_lifecycle.py")
+        self.assertEqual(payload["exit_code"], 1)
+        self.assertEqual(
+            [item["id"] for item in payload["errors"]],
+            [active.id, other.id, handled.id],
+        )
+        active_items = [item for item in payload["errors"] if item["active"]]
+        self.assertEqual(len(active_items), 1)
+        self.assertEqual(active_items[0]["id"], active.id)
+        self.assertTrue(active_items[0]["handled"])
+        self.assertFalse(payload["errors"][1]["handled"])
+
+    def test_status_server_state_can_switch_error_entries(self):
+        state = TermFixState()
+        state.loop = self._start_loop()
+        first = _entry("session-a", "pytest")
+        first.result = "First focused fix."
+        first.status = "done"
+        second = _entry("session-a", "npm test")
+        second.result = "Second focused fix."
+        second.status = "done"
+        state.errors.extend([first, second])
+        _ensure_status_server(state)
+        try:
+            first_payload = _read_json(_status_endpoint(state, "/state", {"entry": first.id}))
+            second_payload = _read_json(_status_endpoint(state, "/state", {"entry": second.id}))
+        finally:
+            _stop_status_server(state)
+
+        self.assertTrue(first_payload["ok"])
+        self.assertEqual(first_payload["entry_id"], first.id)
+        self.assertIn("First focused fix.", first_payload["body_html"])
+        self.assertTrue(second_payload["ok"])
+        self.assertEqual(second_payload["entry_id"], second.id)
+        self.assertIn("Second focused fix.", second_payload["body_html"])
+        self.assertEqual(
+            [item["id"] for item in second_payload["errors"] if item["active"]],
+            [second.id],
+        )
+
     def test_status_server_state_poll_marks_error_handled(self):
         state = TermFixState()
         state.loop = self._start_loop()

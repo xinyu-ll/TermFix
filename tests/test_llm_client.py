@@ -15,10 +15,12 @@ from termfixlib.llm_client import (
     _build_chat_messages,
     _chat_completions_url,
     _clean_markdown,
+    _post_connection_test,
     _post_chat_completion,
     _post_chat_completion_stream,
     _remove_prefix,
     _run_blocking_in_thread,
+    check_provider_connection,
 )
 
 
@@ -123,6 +125,73 @@ def test_run_blocking_in_thread_runs_callable_with_context_and_kwargs():
 
     assert worker_thread != caller_thread
     assert result == "value:ctx-123:done"
+
+
+def test_check_provider_connection_reports_missing_api_key_without_request(monkeypatch):
+    def fail_urlopen(request, timeout):  # noqa: ANN001
+        raise AssertionError("connection test should not send a request")
+
+    monkeypatch.setattr(llm_client, "_urlopen", fail_urlopen)
+
+    result = check_provider_connection("", "https://api.example.test", "model")
+
+    assert result == {
+        "ok": False,
+        "kind": "missing_api_key",
+        "error": "API key is not configured. Set the API Key knob before testing.",
+    }
+
+
+def test_post_connection_test_uses_configured_url_header_payload_and_timeout(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["content_type"] = request.get_header("Content-type")
+        captured["user_agent"] = request.get_header("User-agent")
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeResponse({"choices": [{"message": {"content": "O"}}]})
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+
+    _post_connection_test("sk-secret", "https://api.example.test/v1", "model-x")
+
+    assert captured["url"] == "https://api.example.test/v1/chat/completions"
+    assert captured["authorization"] == "Bearer sk-secret"
+    assert captured["content_type"] == "application/json"
+    assert captured["user_agent"] == "TermFix/1.0"
+    assert captured["timeout"] == 8
+    assert captured["payload"]["model"] == "model-x"
+    assert captured["payload"]["max_tokens"] == 2
+    assert captured["payload"]["stream"] is False
+    assert captured["payload"]["messages"] == [
+        {"role": "system", "content": "You are a connection test. Reply with OK."},
+        {"role": "user", "content": "Reply with OK."},
+    ]
+
+
+def test_check_provider_connection_returns_structured_error_and_redacts_key(monkeypatch, caplog):
+    def fake_urlopen(request, timeout):  # noqa: ANN001
+        raise _http_error(500, "provider echoed sk-secret")
+
+    monkeypatch.setattr(llm_client, "_urlopen", fake_urlopen)
+
+    with caplog.at_level("WARNING", logger="termfixlib.llm_client"):
+        result = check_provider_connection(
+            "sk-secret",
+            "https://api.example.test",
+            "model-x",
+        )
+
+    assert result == {
+        "ok": False,
+        "kind": "api",
+        "status_code": 500,
+        "error": "provider echoed [redacted]",
+    }
+    assert "sk-secret" not in "\n".join(record.getMessage() for record in caplog.records)
 
 
 def test_post_chat_completion_retries_transient_network_error(monkeypatch):

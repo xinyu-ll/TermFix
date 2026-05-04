@@ -233,6 +233,29 @@ class TermFixState:
                 return entry
         return None
 
+    def recent_errors(
+        self,
+        active_entry_id: str = "",
+        limit: int = 10,
+    ) -> list[ErrorEntry]:
+        """Return newest retained errors, always including the active entry."""
+        with self._state_lock:
+            limit = max(1, int(limit))
+            entries = list(self.errors[-limit:])
+            active_entry = None
+            if active_entry_id:
+                for entry in self.errors:
+                    if entry.id == active_entry_id:
+                        active_entry = entry
+                        break
+            if active_entry is not None and active_entry.id not in {
+                entry.id for entry in entries
+            }:
+                if len(entries) >= limit:
+                    entries = entries[1:]
+                entries.append(active_entry)
+            return list(reversed(entries))
+
     def get_error(self, entry_id: str) -> Optional[ErrorEntry]:
         with self._state_lock:
             for entry in self.errors:

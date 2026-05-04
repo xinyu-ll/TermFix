@@ -40,6 +40,10 @@ _USER_AGENT = "TermFix/1.0"
 _MACOS_CA_FILE = "/private/etc/ssl/cert.pem"
 _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
 _TRANSIENT_HTTP_STATUS_CODES = {429, 503}
+_CONNECTION_TEST_MAX_TOKENS = 2
+_CONNECTION_TEST_TIMEOUT = 8
+_CONNECTION_TEST_SYSTEM_PROMPT = "You are a connection test. Reply with OK."
+_CONNECTION_TEST_USER_MESSAGE = "Reply with OK."
 _TRANSIENT_NETWORK_ERRORS = (
     urllib.error.URLError,
     ConnectionError,
@@ -76,6 +80,63 @@ class ApiError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+
+
+def check_provider_connection(
+    api_key: str,
+    base_url: str = DEFAULT_BASE_URL,
+    model: str = DEFAULT_MODEL,
+) -> dict[str, Any]:
+    """Send a minimal chat-completions request and return JSON-safe status."""
+    if not api_key:
+        return {
+            "ok": False,
+            "kind": "missing_api_key",
+            "error": "API key is not configured. Set the API Key knob before testing.",
+        }
+
+    safe_base_url = _redact_secret(_normalise_base_url(base_url), api_key)
+    safe_model = _redact_secret(model, api_key)
+    try:
+        logger.info("Testing LLM provider connection via %s model=%s", safe_base_url, safe_model)
+        _post_connection_test(api_key, base_url, model)
+    except ApiError as exc:
+        error = _connection_test_api_error(exc, api_key)
+        logger.warning(
+            "LLM provider connection test failed with status %s: %s",
+            exc.status_code,
+            error,
+        )
+        return {
+            "ok": False,
+            "kind": _connection_test_error_kind(exc.status_code),
+            "status_code": exc.status_code,
+            "error": error,
+        }
+    except _TRANSIENT_NETWORK_ERRORS as exc:
+        error = _redact_secret(str(getattr(exc, "reason", exc)), api_key)
+        logger.warning("LLM provider connection test network failure: %s", error)
+        return {
+            "ok": False,
+            "kind": "network",
+            "error": f"Network error reaching provider: {error}",
+        }
+    except Exception as exc:
+        error = _redact_secret(str(exc), api_key)
+        logger.warning("LLM provider connection test failed: %s", error)
+        return {
+            "ok": False,
+            "kind": "unexpected",
+            "error": error or "Connection test failed.",
+        }
+
+    logger.info("LLM provider connection test succeeded via %s model=%s", safe_base_url, safe_model)
+    return {
+        "ok": True,
+        "message": "Connection succeeded.",
+        "base_url": safe_base_url,
+        "model": safe_model,
+    }
 
 
 async def analyze_error(
@@ -406,6 +467,46 @@ def _post_chat_completion_stream(
             raise
 
 
+def _post_connection_test(
+    api_key: str,
+    base_url: str,
+    model: str,
+    timeout: int = _CONNECTION_TEST_TIMEOUT,
+) -> None:
+    """Send one minimal non-streaming request to validate provider settings."""
+    payload = {
+        "model": model,
+        "max_tokens": _CONNECTION_TEST_MAX_TOKENS,
+        "temperature": 0,
+        "stream": False,
+        "messages": _build_chat_messages(
+            _CONNECTION_TEST_SYSTEM_PROMPT,
+            _CONNECTION_TEST_USER_MESSAGE,
+        ),
+    }
+    request = urllib.request.Request(
+        url=_chat_completions_url(base_url),
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_request_headers(api_key),
+        method="POST",
+    )
+
+    try:
+        with _urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise ApiError(exc.code, _extract_error_message(body)) from exc
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ApiError(502, f"Invalid JSON from provider: {body[:200]}") from exc
+
+    if not isinstance(parsed.get("choices"), list):
+        raise ApiError(502, "Provider response did not include chat completion choices.")
+
+
 def _retry_transient_failure(exc: BaseException, attempt: int, operation: str) -> bool:
     """Sleep before retrying provider failures that are commonly transient."""
     if attempt >= len(_TRANSIENT_RETRY_DELAYS):
@@ -546,6 +647,33 @@ Check your TermFix API settings and try again.
 ### Details
 {details}
 """
+
+
+def _connection_test_api_error(exc: ApiError, api_key: str) -> str:
+    message = _redact_secret(exc.message, api_key)
+    if exc.status_code in (401, 403):
+        return "Authentication failed. Verify your API key and provider permissions."
+    if exc.status_code == 404:
+        return f"Provider endpoint was not found. Check the Base URL. Details: {message}"
+    if exc.status_code == 429:
+        return "Provider rate limit reached. Wait and try again."
+    return message or f"Provider returned HTTP {exc.status_code}."
+
+
+def _connection_test_error_kind(status_code: int) -> str:
+    if status_code in (401, 403):
+        return "auth"
+    if status_code == 404:
+        return "endpoint"
+    if status_code == 429:
+        return "rate_limit"
+    return "api"
+
+
+def _redact_secret(text: str, secret: str) -> str:
+    if not text or not secret:
+        return text
+    return text.replace(secret, "[redacted]")
 
 
 def _normalise_base_url(base_url: str) -> str:

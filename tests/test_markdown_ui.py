@@ -7,7 +7,10 @@ from types import SimpleNamespace
 sys.modules.setdefault("iterm2", types.ModuleType("iterm2"))
 
 from termfixlib.config import DEFAULT_MAX_TOKENS
+from termfixlib import markdown as markdown_rendering
 from termfixlib.ui import (
+    _CODE_BLOCK_COPY_CSS,
+    _CODE_BLOCK_COPY_JS,
     _build_info_html,
     _build_live_html,
     _build_prompt_html,
@@ -15,6 +18,7 @@ from termfixlib.ui import (
     _conversation_to_html,
     _insert_code_text,
     _markdown_to_html,
+    _prompt_context_label,
     _sync_knobs,
 )
 
@@ -26,6 +30,13 @@ class FakeSession:
 
     async def async_send_text(self, text, suppress_broadcast=False):
         self.sent.append((text, suppress_broadcast))
+
+
+def test_ui_keeps_markdown_helper_compatibility_aliases():
+    assert _markdown_to_html is markdown_rendering._markdown_to_html
+    assert _compact_text is markdown_rendering._compact_text
+    assert _CODE_BLOCK_COPY_CSS is markdown_rendering._CODE_BLOCK_COPY_CSS
+    assert _CODE_BLOCK_COPY_JS is markdown_rendering._CODE_BLOCK_COPY_JS
 
 
 def test_markdown_to_html_renders_safe_subset_and_escapes_html():
@@ -120,6 +131,8 @@ def test_code_block_copy_controls_are_shared_by_live_and_prompt_popovers():
         "function selectCodeText(code)",
         "async function insertCodeText(text)",
         "function handleCodeBlockCopy(event)",
+        'button.removeAttribute("title");',
+        'insertButton.textContent = blocked ? "Use Copy" : "Insert failed";',
         '<button class="code-action copy-code" type="button" data-copy-code>Copy</button>',
         '<button class="code-action insert-code" type="button" data-insert-code>Insert</button>',
         "/test-token/insert?session=session-1",
@@ -132,7 +145,45 @@ def test_code_block_copy_controls_are_shared_by_live_and_prompt_popovers():
     assert "if (handleCodeBlockCopy(event))" in prompt_html
 
 
-def test_insert_code_text_sends_exact_text_to_target_session():
+def test_live_popover_includes_error_inbox_navigation():
+    state = SimpleNamespace(
+        status_server_url="http://127.0.0.1:9",
+        status_server_token="test-token",
+        prompts=[],
+        context_lines=12,
+        fix_hotkey="Cmd+J",
+    )
+    active = SimpleNamespace(
+        id="error-1",
+        session_id="session-1",
+        command="pytest",
+        exit_code=1,
+        result="Active result",
+        status="done",
+        handled=True,
+    )
+    other = SimpleNamespace(
+        id="error-2",
+        session_id="session-1",
+        command="npm test",
+        exit_code=2,
+        result="Other result",
+        status="pending",
+        handled=False,
+    )
+    state.errors = [other, active]
+
+    live_html = _build_live_html(active, state)
+
+    assert 'id="error-list"' in live_html
+    assert 'data-entry-id="error-1"' in live_html
+    assert 'data-entry-id="error-2"' in live_html
+    assert '<span class="error-pill current">current</span>' in live_html
+    assert "function setActiveEntry(entryId)" in live_html
+    assert 'withEntry(endpoint, activeEntryId) + "&start=1&t="' in live_html
+
+
+def test_insert_code_text_strips_final_newline_before_sending():
     session = FakeSession()
     state = SimpleNamespace(
         terminal_sessions={"session-1": session},
@@ -140,10 +191,28 @@ def test_insert_code_text_sends_exact_text_to_target_session():
         connection=None,
     )
 
-    result = asyncio.run(_insert_code_text("printf 'hi'\n# no enter", state, "session-1"))
+    result = asyncio.run(_insert_code_text("printf 'hi'\n# no enter\n", state, "session-1"))
 
     assert result == {"ok": True, "session_id": "session-1"}
     assert session.sent == [("printf 'hi'\n# no enter", True)]
+
+
+def test_insert_code_text_blocks_dangerous_commands_without_sending():
+    session = FakeSession()
+    state = SimpleNamespace(
+        terminal_sessions={"session-1": session},
+        prompt_sessions={},
+        connection=None,
+    )
+
+    for command in ("rm -rf /", "git reset --hard", "chmod -R 777 /tmp/project"):
+        result = asyncio.run(_insert_code_text(command, state, "session-1"))
+
+        assert result["ok"] is False
+        assert "Insert blocked" in result["error"]
+        assert "Use Copy" in result["error"]
+
+    assert session.sent == []
 
 
 def test_insert_code_text_reports_missing_session():
@@ -172,9 +241,19 @@ def test_live_popover_slows_polling_after_analysis_done():
 
     live_html = _build_live_html(live_entry, state)
 
+    assert "Context redaction active" in live_html
     assert "let pollDelay = 350;" in live_html
     assert "const nextDelay = data.done ? 2000 : 350;" in live_html
     assert "timer = setInterval(refresh, pollDelay);" in live_html
+
+
+def test_prompt_context_label_mentions_redaction_status():
+    entry = SimpleNamespace(session_id="session-1", context={"context_lines": 8}, messages=[])
+    state = SimpleNamespace(context_lines=12)
+
+    assert _prompt_context_label(entry, state, "session-1") == (
+        "Current session context - last 8 lines of output, context redaction active"
+    )
 
 
 def test_live_and_prompt_popovers_include_dark_mode_variables():
@@ -449,4 +528,35 @@ def test_info_popover_exposes_validation_errors_and_current_knobs():
     assert "https://api.example.com" in rendered
     assert "<code>4096</code>" in rendered
     assert "<code>Cmd+K</code> / <code>Cmd+P</code>" in rendered
+    assert "Context redaction active" in rendered
     assert "Base URL must include a host name." in rendered
+    assert '<button id="test-connection" type="button">Test connection</button>' in rendered
+    assert 'const testEndpoint = "http://127.0.0.1:9/test-token/test-connection";' in rendered
+    assert "const hasApiKey = false;" in rendered
+    assert "API key is missing. Configure the API Key knob before testing." in rendered
+    assert "if (!hasApiKey) {" in rendered
+    assert "fetch(testEndpoint, {" in rendered
+
+
+def test_info_popover_marks_connection_test_available_when_api_key_configured():
+    state = SimpleNamespace(
+        status_server_url="http://127.0.0.1:9",
+        status_server_token="test-token",
+        api_key="sk-secret",
+        api_key_error="",
+        base_url="https://api.example.com",
+        base_url_error="",
+        model="model-x",
+        max_tokens=4096,
+        max_tokens_error="",
+        fix_hotkey="Cmd+K",
+        fix_hotkey_error="",
+        prompt_hotkey="Cmd+P",
+        prompt_hotkey_error="",
+    )
+
+    rendered = _build_info_html(state)
+
+    assert "<code>Configured</code>" in rendered
+    assert "const hasApiKey = true;" in rendered
+    assert "sk-secret" not in rendered

@@ -199,6 +199,28 @@ assets/
 └── cmdl.png            手动提问弹窗截图
 ```
 
+## Development
+
+TermFix 运行时只依赖 Python 标准库和 iTerm2 脚本环境。测试依赖记录在 `requirements-dev.txt`，也可以通过 `pyproject.toml` 的 `dev` extra 安装：
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+# 或
+python3 -m pip install -e ".[dev]"
+```
+
+提交前建议先做编译检查。`PYTHONPYCACHEPREFIX` 会把字节码缓存写到临时目录，避免在源码目录留下 `__pycache__/`：
+
+```bash
+PYTHONPYCACHEPREFIX=/private/tmp/termfix-pycache python3 -m py_compile termfix.py termfixlib/*.py
+```
+
+运行测试：
+
+```bash
+python3 -m pytest
+```
+
 ## Troubleshooting
 
 **状态栏没有出现 TermFix**

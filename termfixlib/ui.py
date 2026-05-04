@@ -48,19 +48,30 @@ from .config import (
     normalize_command_hotkey,
     normalize_max_tokens,
 )
+from . import markdown as _markdown_rendering
 from .context import collect_context, normalize_context_lines
-from .llm_client import stream_analyze_error, stream_user_prompt
+from .llm_client import check_provider_connection, stream_analyze_error, stream_user_prompt
 from .monitor import PromptEntry
+from .safety import REDACTION_STATUS_TEXT, UnsafeInsertError, prepare_insert_text
 
 logger = logging.getLogger(__name__)
 
 _INFO_POPOVER_ID = "__info__"
 _PROMPT_POPOVER_ID = "__prompt__"
+_ERROR_INBOX_LIMIT = 10
 _STATE_LOOP_CALL_TIMEOUT = 2
 _STATUS_REGISTER_TIMEOUT = 10
 _POPOVER_CORS_ORIGIN = "null"
 _POPOVER_ROUTES = frozenset(
-    {"/cancel", "/closed", "/insert", "/prompt/new", "/prompt", "/state"}
+    {
+        "/cancel",
+        "/closed",
+        "/insert",
+        "/prompt/new",
+        "/prompt",
+        "/state",
+        "/test-connection",
+    }
 )
 _API_KEY_LABEL_RE = re.compile(
     r"^\s*(?:api\s*key|openai[_\s-]*api[_\s-]*key|authorization|bearer|token)\s*[:=]",
@@ -72,155 +83,13 @@ _API_KEY_LABELED_VALUE_RE = re.compile(
 )
 _API_KEY_BEARER_RE = re.compile(r"^\s*bearer\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _API_KEY_ENV_VARS = ("TERMFIX_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY")
-_CODE_BLOCK_COPY_CSS = """\
-    .code-block {
-      position: relative;
-      margin: 7px 0 10px;
-      border-radius: 8px;
-      background: #1d1d1b;
-      overflow: hidden;
-    }
-    .code-actions {
-      position: absolute;
-      top: 7px;
-      right: 7px;
-      z-index: 1;
-      display: flex;
-      gap: 5px;
-    }
-    .code-action {
-      height: 24px;
-      min-width: 50px;
-      padding: 0 8px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.08);
-      color: rgba(255, 255, 255, 0.78);
-      font: 700 11px var(--sans, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif);
-      cursor: pointer;
-    }
-    .code-action:hover {
-      background: rgba(255, 255, 255, 0.14);
-      color: #ffffff;
-    }
-    .code-action.copied,
-    .code-action.inserted {
-      color: #ffffff;
-      background: rgba(36, 165, 121, 0.5);
-    }
-    .code-action.needs-manual-copy,
-    .code-action.error {
-      color: #ffffff;
-      background: rgba(191, 90, 90, 0.55);
-    }
-    .markdown pre {
-      margin: 0;
-      padding: 9px 11px;
-      padding-right: 132px;
-      overflow-x: auto;
-      background: #1d1d1b;
-    }
-"""
-_CODE_BLOCK_COPY_JS = """\
-    async function copyText(text) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-      const copyTarget = document.createElement("textarea");
-      copyTarget.value = text;
-      copyTarget.setAttribute("readonly", "");
-      copyTarget.style.position = "fixed";
-      copyTarget.style.left = "-9999px";
-      document.body.appendChild(copyTarget);
-      copyTarget.select();
-      try {
-        if (!document.execCommand("copy")) {
-          throw new Error("Clipboard copy failed.");
-        }
-      } finally {
-        document.body.removeChild(copyTarget);
-      }
-    }
-
-    function selectCodeText(code) {
-      const selection = window.getSelection ? window.getSelection() : null;
-      const range = document.createRange ? document.createRange() : null;
-      if (!selection || !range) {
-        return false;
-      }
-      range.selectNodeContents(code);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      return true;
-    }
-
-    function resetCodeButton(button, label, className, delay) {
-      setTimeout(() => {
-        button.textContent = label;
-        if (className) {
-          button.classList.remove(className);
-        }
-      }, delay);
-    }
-
-    async function insertCodeText(text) {
-      if (typeof insertEndpoint !== "string" || !insertEndpoint) {
-        throw new Error("Insert endpoint is unavailable.");
-      }
-      const response = await fetch(insertEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
-      });
-      const data = await response.json();
-      if (!data.ok) {
-        throw new Error(data.error || "Insert failed.");
-      }
-    }
-
-    function handleCodeBlockCopy(event) {
-      const target = event.target && event.target.closest ? event.target : null;
-      const copyButton = target ? target.closest("[data-copy-code]") : null;
-      const insertButton = target ? target.closest("[data-insert-code]") : null;
-      const actionButton = copyButton || insertButton;
-      if (!actionButton) {
-        return false;
-      }
-
-      const block = actionButton.closest(".code-block");
-      const code = block ? block.querySelector("code") : null;
-      if (!code) {
-        return true;
-      }
-
-      if (insertButton) {
-        insertCodeText(code.textContent || "").then(() => {
-          insertButton.textContent = "Inserted";
-          insertButton.classList.add("inserted");
-          resetCodeButton(insertButton, "Insert", "inserted", 1400);
-        }).catch((error) => {
-          insertButton.textContent = error.message || "Insert failed";
-          insertButton.classList.add("error");
-          resetCodeButton(insertButton, "Insert", "error", 2200);
-        });
-        return true;
-      }
-
-      copyText(code.textContent || "").then(() => {
-        copyButton.textContent = "Copied";
-        copyButton.classList.add("copied");
-        resetCodeButton(copyButton, "Copy", "copied", 1200);
-      }).catch(() => {
-        const selected = selectCodeText(code);
-        copyButton.textContent = selected ? "Selected - Cmd+C" : "Select code";
-        copyButton.classList.remove("copied");
-        copyButton.classList.add("needs-manual-copy");
-        resetCodeButton(copyButton, "Copy", "needs-manual-copy", 2800);
-      });
-      return true;
-    }
-"""
+_CODE_BLOCK_COPY_CSS = _markdown_rendering._CODE_BLOCK_COPY_CSS
+_CODE_BLOCK_COPY_JS = _markdown_rendering._CODE_BLOCK_COPY_JS
+_compact_text = _markdown_rendering._compact_text
+_inline_bold_to_html = _markdown_rendering._inline_bold_to_html
+_inline_markdown = _markdown_rendering._inline_markdown
+_markdown_to_html = _markdown_rendering._markdown_to_html
+_plain_text_to_html = _markdown_rendering._plain_text_to_html
 
 
 def _popover_cors_origin(origin: str) -> Optional[str]:
@@ -660,6 +529,98 @@ def _pick_entry(state: "TermFixState", session_id: Optional[str]):
     return state.last_viewed_error()
 
 
+def _recent_error_entries(
+    state: "TermFixState",
+    active_entry_id: str,
+    active_entry=None,  # noqa: ANN001 - accepts ErrorEntry-like test doubles.
+) -> list:
+    recent_errors = getattr(state, "recent_errors", None)
+    if callable(recent_errors):
+        entries = list(recent_errors(active_entry_id, _ERROR_INBOX_LIMIT))
+    else:
+        entries = list(reversed(list(getattr(state, "errors", []) or [])[-_ERROR_INBOX_LIMIT:]))
+
+    if active_entry is not None:
+        active_id = str(getattr(active_entry, "id", ""))
+        if active_id and active_id not in {str(getattr(entry, "id", "")) for entry in entries}:
+            entries.insert(0, active_entry)
+    return entries
+
+
+def _error_inbox_payload(
+    state: "TermFixState",
+    active_entry_id: str,
+    active_entry=None,  # noqa: ANN001 - accepts ErrorEntry-like test doubles.
+) -> list[dict]:
+    items: list[dict] = []
+    for entry in _recent_error_entries(state, active_entry_id, active_entry):
+        entry_id = str(getattr(entry, "id", ""))
+        if not entry_id:
+            continue
+        items.append(
+            {
+                "id": entry_id,
+                "command": str(getattr(entry, "command", "") or "(unknown command)"),
+                "exit_code": getattr(entry, "exit_code", ""),
+                "status": str(getattr(entry, "status", "") or "pending"),
+                "handled": bool(getattr(entry, "handled", False)),
+                "active": entry_id == active_entry_id,
+                "updated_at": getattr(entry, "updated_at", 0),
+            }
+        )
+    return items
+
+
+def _error_inbox_to_html(
+    state: "TermFixState",
+    active_entry_id: str,
+    active_entry=None,  # noqa: ANN001 - accepts ErrorEntry-like test doubles.
+) -> str:
+    items = _error_inbox_payload(state, active_entry_id, active_entry)
+    if not items:
+        return '<div class="error-empty">No recent errors</div>'
+
+    blocks: list[str] = []
+    for item in items:
+        classes = ["error-item"]
+        if item["active"]:
+            classes.append("active")
+        classes.append("handled" if item["handled"] else "unhandled")
+        command = html.escape(str(item["command"]))
+        status = html.escape(str(item["status"]))
+        exit_code = html.escape(str(item["exit_code"]))
+        handled = "handled" if item["handled"] else "unhandled"
+        current = '<span class="error-pill current">current</span>' if item["active"] else ""
+        aria_current = ' aria-current="true"' if item["active"] else ""
+        blocks.append(
+            f'<button class="{" ".join(classes)}" data-entry-id="{html.escape(item["id"])}" '
+            f'title="{command}" type="button"{aria_current}>'
+            f'<span class="error-command">{command}</span>'
+            '<span class="error-meta">'
+            f"<span>exit {exit_code}</span>"
+            f"<span>{status}</span>"
+            f'<span class="error-pill">{handled}</span>'
+            f"{current}"
+            "</span>"
+            "</button>"
+        )
+    return "\n".join(blocks)
+
+
+def _maybe_start_error_analysis(entry, state: "TermFixState") -> None:  # noqa: ANN001
+    if getattr(entry, "analysis_started", False):
+        return
+    if getattr(entry, "status", "pending") != "pending":
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if getattr(state, "loop", None) is None:
+        state.loop = loop
+    _start_analysis_task_on_loop(entry, state)
+
+
 def _notify_ui_update_from_thread(state: "TermFixState") -> None:
     if state.loop is None:
         return
@@ -793,13 +754,28 @@ def _ensure_status_server(state: "TermFixState") -> None:
                 self._send_json(_insert_code_from_thread(state, text, session_id))
                 return
 
+            if request_path == "/test-connection":
+                if self.command != "POST":
+                    self.send_error(405)
+                    return
+                self._send_json(_test_connection_from_thread(state))
+                return
+
             if request_path != "/state":
                 self.send_error(404)
                 return
 
             entry_id = parse_qs(parsed.query).get("entry", [""])[0]
             session_id = parse_qs(parsed.query).get("session", [""])[0]
-            self._send_json(_entry_payload_from_thread(state, entry_id, session_id))
+            start_analysis = parse_qs(parsed.query).get("start", [""])[0] == "1"
+            self._send_json(
+                _entry_payload_from_thread(
+                    state,
+                    entry_id,
+                    session_id,
+                    start_analysis=start_analysis,
+                )
+            )
 
         def _authenticated_path(self, parsed) -> Optional[str]:  # noqa: ANN001
             parts = parsed.path.split("/")
@@ -935,11 +911,17 @@ def _entry_payload_from_thread(
     state: "TermFixState",
     entry_id: str,
     popover_session_id: str = "",
+    start_analysis: bool = False,
 ) -> dict:
     """Build a state payload on the asyncio loop."""
     return _call_state_loop_from_thread(
         state,
-        lambda: _entry_payload_on_loop(entry_id, state, popover_session_id),
+        lambda: _entry_payload_on_loop(
+            entry_id,
+            state,
+            popover_session_id,
+            start_analysis=start_analysis,
+        ),
         "State payload",
     )
 
@@ -948,14 +930,21 @@ async def _entry_payload_on_loop(
     entry_id: str,
     state: "TermFixState",
     popover_session_id: str = "",
+    start_analysis: bool = False,
 ) -> dict:
-    return _entry_payload(state, entry_id, popover_session_id)
+    return _entry_payload(
+        state,
+        entry_id,
+        popover_session_id,
+        start_analysis=start_analysis,
+    )
 
 
 def _entry_payload(
     state: "TermFixState",
     entry_id: str,
     popover_session_id: str = "",
+    start_analysis: bool = False,
 ) -> dict:
     """Return a JSON-safe snapshot of the current analysis state."""
     if entry_id == _INFO_POPOVER_ID:
@@ -1008,9 +997,12 @@ def _entry_payload(
             "status": "missing",
             "done": True,
             "should_close": False,
+            "errors": _error_inbox_payload(state, entry_id),
             "body_html": "<p>This TermFix result is no longer available.</p>",
         }
 
+    if start_analysis:
+        _maybe_start_error_analysis(entry, state)
     _mark_error_handled_from_thread(state, entry_id)
     state.mark_popover_seen(entry_id)
     markdown = entry.result or "Analyzing..."
@@ -1018,10 +1010,14 @@ def _entry_payload(
     return {
         "ok": True,
         "entry_id": entry.id,
+        "session_id": entry.session_id,
+        "command": entry.command or "(unknown command)",
+        "exit_code": entry.exit_code,
         "status": entry.status,
         "done": done,
         "should_close": state.consume_popover_close_request(entry_id),
         "updated_at": entry.updated_at,
+        "errors": _error_inbox_payload(state, entry.id, entry),
         "body_html": _markdown_to_html(markdown),
     }
 
@@ -1074,11 +1070,36 @@ def _insert_code_from_thread(
     )
 
 
+def _test_connection_from_thread(state: "TermFixState") -> dict:
+    """Run a provider connection test from the HTTP handler thread."""
+    api_key = getattr(state, "api_key", "")
+    if not api_key:
+        return {
+            "ok": False,
+            "kind": "missing_api_key",
+            "error": "API key is not configured. Set the API Key knob before testing.",
+        }
+
+    return check_provider_connection(
+        api_key=api_key,
+        base_url=getattr(state, "base_url", DEFAULT_BASE_URL),
+        model=getattr(state, "model", DEFAULT_MODEL),
+    )
+
+
 async def _insert_code_text(
     text: str,
     state: "TermFixState",
     popover_session_id: str = "",
 ) -> dict:
+    try:
+        text = prepare_insert_text(text)
+    except UnsafeInsertError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if not text:
+        return {"ok": False, "error": "Code block is empty after removing final newlines."}
+
     session, session_id = await _resolve_insert_session(state, popover_session_id)
     if session is None:
         return {"ok": False, "error": "Current terminal session is unavailable."}
@@ -1250,11 +1271,18 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     failed_cmd = html.escape(entry.command or "(unknown command)")
     exit_code = entry.exit_code
     body = _markdown_to_html(entry.result or "Analyzing...")
-    endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": entry.id}))
-    close_endpoint = json.dumps(_status_endpoint(state, "/closed", {"entry": entry.id}))
+    inbox = _error_inbox_to_html(state, entry.id, entry)
+    redaction_note = html.escape(
+        f"{REDACTION_STATUS_TEXT}: command/output redacted before sending."
+    )
+    endpoint = json.dumps(_status_endpoint(state, "/state"))
+    close_endpoint = json.dumps(_status_endpoint(state, "/closed"))
     close_key = json.dumps(
         _hotkey_letter(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)).lower()
     )
+    active_entry_id = json.dumps(entry.id)
+    active_session_id = json.dumps(getattr(entry, "session_id", ""))
+    insert_endpoint_base = json.dumps(_status_endpoint(state, "/insert"))
     insert_endpoint = json.dumps(
         _status_endpoint(state, "/insert", {"session": getattr(entry, "session_id", "")})
     )
@@ -1292,15 +1320,23 @@ def _build_live_html(entry, state: "TermFixState") -> str:
         --code-ink: #32d74b;
       }}
     }}
+    html, body {{
+      height: 100%;
+    }}
     body {{
+      height: 100%;
+      display: flex;
+      flex-direction: column;
       font-family: var(--sans);
       font-size: 13px;
       color: var(--ink);
       background: var(--paper);
       padding: 14px 16px;
       line-height: 1.45;
+      overflow: hidden;
     }}
     header {{
+      flex: 0 0 auto;
       display: flex;
       align-items: center;
       gap: 8px;
@@ -1349,6 +1385,11 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       padding: 0;
     }}
     .failed-cmd {{
+      min-width: 0;
+      max-width: 210px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       font-family: var(--mono);
       font-size: 11px;
       color: var(--muted);
@@ -1357,9 +1398,91 @@ def _build_live_html(entry, state: "TermFixState") -> str:
       padding: 1px 6px;
     }}
     .status {{
+      flex: 0 0 auto;
       margin-left: auto;
       font-size: 11px;
       color: var(--muted);
+    }}
+    .security-note {{
+      flex: 0 0 auto;
+      margin: -4px 0 10px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 650;
+    }}
+    .error-inbox {{
+      flex: 0 0 auto;
+      margin: -2px 0 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .inbox-label {{
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }}
+    .error-list {{
+      display: flex;
+      gap: 7px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }}
+    .error-item {{
+      width: 156px;
+      flex: 0 0 156px;
+      min-height: 58px;
+      padding: 8px 9px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: var(--field);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }}
+    .error-item:hover {{
+      border-color: var(--line);
+    }}
+    .error-item.active {{
+      border-color: var(--accent);
+      background: var(--panel);
+    }}
+    .error-command {{
+      display: block;
+      overflow: hidden;
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .error-meta {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 7px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+    }}
+    .error-pill.current {{
+      color: var(--accent);
+    }}
+    .error-empty {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    #content {{
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 2px;
     }}
     .status.streaming::after {{
       content: "";
@@ -1378,16 +1501,29 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 <body>
   <header>
     <h1>TermFix</h1>
-    <span class="failed-cmd">{failed_cmd}</span>
-    <span class="badge">exit {exit_code}</span>
+    <span id="failed-cmd" class="failed-cmd">{failed_cmd}</span>
+    <span id="exit-code" class="badge">exit {exit_code}</span>
     <span id="status" class="status {html.escape(entry.status)}">{html.escape(entry.status)}</span>
   </header>
+
+  <div class="security-note">{redaction_note}</div>
+  <nav class="error-inbox" aria-label="Recent failed commands">
+    <div class="inbox-label">Inbox</div>
+    <div id="error-list" class="error-list">{inbox}</div>
+  </nav>
 
   <div id="content" class="markdown">{body}</div>
   <script>
     const endpoint = {endpoint};
     const closeEndpoint = {close_endpoint};
-    const insertEndpoint = {insert_endpoint};
+    const initialEntryId = {active_entry_id};
+    const insertEndpointBase = {insert_endpoint_base};
+    let activeEntryId = {active_entry_id};
+    let activeSessionId = {active_session_id};
+    let insertEndpoint = {insert_endpoint};
+    const commandEl = document.getElementById("failed-cmd");
+    const exitEl = document.getElementById("exit-code");
+    const errorListEl = document.getElementById("error-list");
     const contentEl = document.getElementById("content");
     const statusEl = document.getElementById("status");
     let lastHtml = contentEl.innerHTML;
@@ -1395,15 +1531,39 @@ def _build_live_html(entry, state: "TermFixState") -> str:
     let pollDelay = 350;
     let closing = false;
 
-    function reportClosed() {{
+    function withEntry(url, entryId) {{
+      const sep = url.includes("?") ? "&" : "?";
+      return url + sep + "entry=" + encodeURIComponent(entryId);
+    }}
+
+    function withSession(url, sessionId) {{
+      if (!sessionId) {{
+        return url;
+      }}
+      const sep = url.includes("?") ? "&" : "?";
+      return url + sep + "session=" + encodeURIComponent(sessionId);
+    }}
+
+    function sendClosed(entryId) {{
+      if (!entryId) {{
+        return;
+      }}
+      const url = withEntry(closeEndpoint, entryId);
       try {{
         if (navigator.sendBeacon) {{
-          navigator.sendBeacon(closeEndpoint);
+          navigator.sendBeacon(url);
         }} else {{
-          fetch(closeEndpoint, {{ method: "POST", keepalive: true }});
+          fetch(url, {{ method: "POST", keepalive: true }});
         }}
       }} catch (error) {{
         // Best effort only.
+      }}
+    }}
+
+    function reportClosed() {{
+      sendClosed(activeEntryId);
+      if (initialEntryId !== activeEntryId) {{
+        sendClosed(initialEntryId);
       }}
     }}
 
@@ -1419,25 +1579,111 @@ def _build_live_html(entry, state: "TermFixState") -> str:
 
 {_CODE_BLOCK_COPY_JS}
 
+    function renderErrorInbox(errors) {{
+      if (!Array.isArray(errors)) {{
+        return;
+      }}
+      errorListEl.textContent = "";
+      if (errors.length === 0) {{
+        const empty = document.createElement("div");
+        empty.className = "error-empty";
+        empty.textContent = "No recent errors";
+        errorListEl.appendChild(empty);
+        return;
+      }}
+      for (const item of errors) {{
+        if (!item || !item.id) {{
+          continue;
+        }}
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "error-item " + (item.active ? "active " : "") +
+          (item.handled ? "handled" : "unhandled");
+        button.dataset.entryId = item.id;
+        if (item.active) {{
+          button.setAttribute("aria-current", "true");
+        }}
+        button.title = item.command || "";
+
+        const command = document.createElement("span");
+        command.className = "error-command";
+        command.textContent = item.command || "(unknown command)";
+        button.appendChild(command);
+
+        const meta = document.createElement("span");
+        meta.className = "error-meta";
+        const exitCode = document.createElement("span");
+        const exitValue = item.exit_code === undefined || item.exit_code === null ? "" : item.exit_code;
+        exitCode.textContent = "exit " + exitValue;
+        const status = document.createElement("span");
+        status.textContent = item.status || "pending";
+        const handled = document.createElement("span");
+        handled.className = "error-pill";
+        handled.textContent = item.handled ? "handled" : "unhandled";
+        meta.appendChild(exitCode);
+        meta.appendChild(status);
+        meta.appendChild(handled);
+        if (item.active) {{
+          const current = document.createElement("span");
+          current.className = "error-pill current";
+          current.textContent = "current";
+          meta.appendChild(current);
+        }}
+        button.appendChild(meta);
+        errorListEl.appendChild(button);
+      }}
+    }}
+
+    function setStatus(status) {{
+      if (!status) {{
+        return;
+      }}
+      statusEl.textContent = status;
+      statusEl.className = "status " + status;
+    }}
+
+    function setActiveEntry(entryId) {{
+      if (!entryId || entryId === activeEntryId) {{
+        return;
+      }}
+      activeEntryId = entryId;
+      lastHtml = "";
+      refresh();
+    }}
+
     async function refresh() {{
       try {{
-        const sep = endpoint.includes("?") ? "&" : "?";
-        const response = await fetch(endpoint + sep + "t=" + Date.now(), {{
-          cache: "no-store"
-        }});
+        const response = await fetch(
+          withEntry(endpoint, activeEntryId) + "&start=1&t=" + Date.now(),
+          {{
+            cache: "no-store"
+          }}
+        );
         const data = await response.json();
         if (data.should_close) {{
           closePopover();
           return;
         }}
+        if (data.entry_id) {{
+          activeEntryId = data.entry_id;
+        }}
+        if (typeof data.session_id === "string") {{
+          activeSessionId = data.session_id;
+          insertEndpoint = withSession(insertEndpointBase, activeSessionId);
+        }}
+        if (typeof data.command === "string") {{
+          commandEl.textContent = data.command;
+          commandEl.title = data.command;
+        }}
+        if (Object.prototype.hasOwnProperty.call(data, "exit_code")) {{
+          exitEl.textContent = "exit " + data.exit_code;
+        }}
+        renderErrorInbox(data.errors);
         if (data.body_html && data.body_html !== lastHtml) {{
           lastHtml = data.body_html;
           contentEl.innerHTML = data.body_html;
         }}
-        if (data.status) {{
-          statusEl.textContent = data.status;
-          statusEl.className = "status " + data.status;
-        }}
+        setStatus(data.status);
         const nextDelay = data.done ? 2000 : 350;
         if (timer && nextDelay !== pollDelay) {{
           clearInterval(timer);
@@ -1445,12 +1691,19 @@ def _build_live_html(entry, state: "TermFixState") -> str:
           timer = setInterval(refresh, pollDelay);
         }}
       }} catch (error) {{
-        statusEl.textContent = "offline";
-        statusEl.className = "status error";
+        setStatus("offline");
       }}
     }}
 
     contentEl.addEventListener("click", handleCodeBlockCopy);
+
+    errorListEl.addEventListener("click", (event) => {{
+      const item = event.target.closest("[data-entry-id]");
+      if (!item) {{
+        return;
+      }}
+      setActiveEntry(item.getAttribute("data-entry-id"));
+    }});
 
     document.addEventListener("keydown", (event) => {{
       if (event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey &&
@@ -2414,12 +2667,18 @@ def _build_info_html(state: "TermFixState") -> str:
         for error in validation_errors
         if error
     )
+    redaction_status = html.escape(REDACTION_STATUS_TEXT)
     close_key = json.dumps(
         _hotkey_letter(getattr(state, "fix_hotkey", DEFAULT_FIX_HOTKEY)).lower()
     )
     endpoint = json.dumps(_status_endpoint(state, "/state", {"entry": _INFO_POPOVER_ID}))
     close_endpoint = json.dumps(
         _status_endpoint(state, "/closed", {"entry": _INFO_POPOVER_ID})
+    )
+    test_endpoint = json.dumps(_status_endpoint(state, "/test-connection"))
+    has_api_key = json.dumps(bool(state.api_key))
+    missing_api_key_message = json.dumps(
+        api_key_error or "API key is missing. Configure the API Key knob before testing."
     )
 
     return f"""\
@@ -2445,6 +2704,35 @@ def _build_info_html(state: "TermFixState") -> str:
       color: #b42318;
       font-weight: 600;
     }}
+    .actions {{
+      margin: 12px 0 8px 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    button {{
+      appearance: none;
+      border: 1px solid #d1d1d6;
+      border-radius: 6px;
+      background: #f2f2f7;
+      color: #1c1c1e;
+      font: inherit;
+      font-weight: 600;
+      padding: 5px 9px;
+      cursor: pointer;
+    }}
+    button:disabled {{
+      cursor: default;
+      opacity: 0.65;
+    }}
+    .connection-status {{
+      min-height: 18px;
+      margin: 0 0 6px 0;
+      font-weight: 600;
+    }}
+    .connection-status.testing {{ color: #6e6e73; }}
+    .connection-status.success {{ color: #167c46; }}
+    .connection-status.failure {{ color: #b42318; }}
     code {{
       font-family: "Menlo", monospace;
       background: #f2f2f7;
@@ -2461,13 +2749,55 @@ def _build_info_html(state: "TermFixState") -> str:
   <div class="item"><span class="label">Model:</span> <code>{model}</code></div>
   <div class="item"><span class="label">Max Tokens:</span> <code>{max_tokens}</code></div>
   <div class="item"><span class="label">Hotkeys:</span> <code>{fix_hotkey}</code> / <code>{prompt_hotkey}</code></div>
+  <div class="item"><span class="label">Context:</span> <code>{redaction_status}</code></div>
   <div class="item"><span class="label">API Key:</span> <code>{api_key_status}</code></div>
   {validation_html}
+  <div class="actions">
+    <button id="test-connection" type="button">Test connection</button>
+  </div>
+  <div id="connection-status" class="connection-status" role="status" aria-live="polite"></div>
   <script>
     const endpoint = {endpoint};
     const closeEndpoint = {close_endpoint};
+    const testEndpoint = {test_endpoint};
+    const hasApiKey = {has_api_key};
+    const missingApiKeyMessage = {missing_api_key_message};
+    const testButton = document.getElementById("test-connection");
+    const connectionStatusEl = document.getElementById("connection-status");
     let timer = null;
     let closing = false;
+
+    function setConnectionStatus(kind, message) {{
+      connectionStatusEl.className = kind ? "connection-status " + kind : "connection-status";
+      connectionStatusEl.textContent = message || "";
+    }}
+
+    async function testConnection() {{
+      if (!hasApiKey) {{
+        setConnectionStatus("failure", missingApiKeyMessage);
+        return;
+      }}
+
+      testButton.disabled = true;
+      setConnectionStatus("testing", "Testing...");
+      try {{
+        const response = await fetch(testEndpoint, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: "{{}}",
+          cache: "no-store"
+        }});
+        const data = await response.json();
+        if (!data.ok) {{
+          throw new Error(data.error || "Connection test failed.");
+        }}
+        setConnectionStatus("success", data.message || "Connection succeeded.");
+      }} catch (error) {{
+        setConnectionStatus("failure", error.message || "Connection test failed.");
+      }} finally {{
+        testButton.disabled = false;
+      }}
+    }}
 
     function reportClosed() {{
       try {{
@@ -2513,6 +2843,7 @@ def _build_info_html(state: "TermFixState") -> str:
         closePopover();
       }}
     }});
+    testButton.addEventListener("click", testConnection);
 
     window.addEventListener("pagehide", () => {{
       if (!closing) {{
@@ -2825,21 +3156,25 @@ def _prompt_context_label(
     popover_session_id: str = "",
 ) -> str:
     """Return the context status shown below the conversation."""
+    redaction_label = REDACTION_STATUS_TEXT.lower()
     if _is_detached_prompt(entry):
         cwd = _prompt_cwd_label(entry.context)
         origin = f" from {cwd}" if cwd else ""
-        return f"Restored history{origin} - next reply uses current session context"
+        return (
+            f"Restored history{origin} - next reply uses current session context, "
+            f"{redaction_label}"
+        )
 
     if not entry.session_id:
-        return "Current session context will attach when you send"
+        return f"Current session context will attach when you send, {redaction_label}"
 
     if popover_session_id and entry.session_id != popover_session_id:
         cwd = _prompt_cwd_label(entry.context)
         origin = f" from {cwd}" if cwd else ""
-        return f"Different session context{origin}"
+        return f"Different session context{origin}, {redaction_label}"
 
     context_lines = _prompt_context_lines(entry.context, state)
-    return f"Current session context - last {context_lines} lines of output"
+    return f"Current session context - last {context_lines} lines of output, {redaction_label}"
 
 
 def _prompt_context_class(entry: PromptEntry, popover_session_id: str = "") -> str:
@@ -2917,25 +3252,6 @@ def _prompt_history_preview(entry: PromptEntry, limit: int = 36) -> str:
 
     title = _compact_text(_prompt_history_title(entry, limit=None))
     return _truncate_text(title, limit)
-
-
-def _compact_text(text: str) -> str:
-    """Collapse markdown-ish text into a single plain preview line."""
-    cleaned_lines: list[str] = []
-    for line in text.splitlines():
-        cleaned = line.strip()
-        cleaned = re.sub(r"^>+\s*", "", cleaned)
-        cleaned = re.sub(r"^#{1,6}\s*", "", cleaned)
-        cleaned = re.sub(r"^(```+|~~~+)\s*\w*\s*$", "", cleaned)
-        cleaned = re.sub(r"^[-+*]\s+", "", cleaned)
-        cleaned = re.sub(r"^\d+[.)]\s+", "", cleaned)
-        cleaned = cleaned.replace("`", "")
-        cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", cleaned)
-        cleaned = re.sub(r"__(.*?)__", r"\1", cleaned)
-        if cleaned:
-            cleaned_lines.append(cleaned)
-    cleaned = " ".join(cleaned_lines)
-    return " ".join(cleaned.split())
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -3047,143 +3363,3 @@ def _prompt_context_hint(context: dict, limit: int = 76) -> str:
         if compact:
             return _truncate_text(compact, limit)
     return ""
-
-
-def _plain_text_to_html(text: str) -> str:
-    """Render user-authored prompt text without interpreting Markdown."""
-    return html.escape(text).replace("\n", "<br>")
-
-
-def _markdown_to_html(markdown: str) -> str:
-    """Render a small, safe Markdown subset to HTML."""
-    lines = markdown.splitlines()
-    blocks: list[str] = []
-    paragraph: list[str] = []
-    list_items: list[str] = []
-    list_tag: Optional[str] = None
-    in_code = False
-    code_lines: list[str] = []
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph
-        if paragraph:
-            blocks.append(f"<p>{_inline_markdown(' '.join(paragraph))}</p>")
-            paragraph = []
-
-    def flush_list() -> None:
-        nonlocal list_items, list_tag
-        if list_items:
-            tag = list_tag or "ul"
-            blocks.append(f"<{tag}>" + "".join(f"<li>{item}</li>" for item in list_items) + f"</{tag}>")
-            list_items = []
-            list_tag = None
-
-    def append_list_item(tag: str, item: str) -> None:
-        nonlocal list_tag
-        if list_tag is not None and list_tag != tag:
-            flush_list()
-        list_tag = tag
-        list_items.append(item)
-
-    def code_block_html(lines: list[str]) -> str:
-        code = html.escape("\n".join(lines))
-        return (
-            '<div class="code-block">'
-            '<div class="code-actions">'
-            '<button class="code-action copy-code" type="button" data-copy-code>Copy</button>'
-            '<button class="code-action insert-code" type="button" data-insert-code>Insert</button>'
-            "</div>"
-            f"<pre><code>{code}</code></pre>"
-            "</div>"
-        )
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("```"):
-            if in_code:
-                blocks.append(code_block_html(code_lines))
-                code_lines = []
-                in_code = False
-            else:
-                flush_paragraph()
-                flush_list()
-                in_code = True
-            continue
-
-        if in_code:
-            code_lines.append(line)
-            continue
-
-        if not stripped:
-            flush_paragraph()
-            flush_list()
-            continue
-
-        if stripped.startswith("### "):
-            flush_paragraph()
-            flush_list()
-            blocks.append(f"<h3>{html.escape(stripped[4:].strip())}</h3>")
-        elif stripped.startswith("## "):
-            flush_paragraph()
-            flush_list()
-            blocks.append(f"<h2>{html.escape(stripped[3:].strip())}</h2>")
-        elif stripped.startswith("# "):
-            flush_paragraph()
-            flush_list()
-            blocks.append(f"<h1>{html.escape(stripped[2:].strip())}</h1>")
-        elif stripped.startswith(("- ", "* ")):
-            flush_paragraph()
-            append_list_item("ul", _inline_markdown(stripped[2:].strip()))
-        elif re.match(r"^\d+[.)]\s+", stripped):
-            flush_paragraph()
-            append_list_item("ol", _inline_markdown(re.sub(r"^\d+[.)]\s+", "", stripped).strip()))
-        else:
-            flush_list()
-            paragraph.append(stripped)
-
-    if in_code:
-        blocks.append(code_block_html(code_lines))
-    flush_paragraph()
-    flush_list()
-
-    return "\n".join(blocks)
-
-
-def _inline_markdown(text: str) -> str:
-    """Render inline code and bold markers."""
-    parts = text.split("`")
-    rendered: list[str] = []
-    for i, part in enumerate(parts):
-        if i % 2 == 1:
-            rendered.append(f"<code>{html.escape(part)}</code>")
-        else:
-            rendered.append(_inline_bold_to_html(part))
-    return "".join(rendered)
-
-
-def _inline_bold_to_html(text: str) -> str:
-    """Render non-empty **bold** spans while preserving literal asterisks."""
-    rendered: list[str] = []
-    pos = 0
-
-    while pos < len(text):
-        start = text.find("**", pos)
-        if start == -1:
-            rendered.append(html.escape(text[pos:]))
-            break
-
-        end = text.find("**", start + 2)
-        if end == -1:
-            rendered.append(html.escape(text[pos:]))
-            break
-
-        content = text[start + 2:end]
-        rendered.append(html.escape(text[pos:start]))
-        if content.strip():
-            rendered.append(f"<strong>{html.escape(content)}</strong>")
-        else:
-            rendered.append(html.escape(text[start:end + 2]))
-        pos = end + 2
-
-    return "".join(rendered)

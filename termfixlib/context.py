@@ -20,6 +20,7 @@ except ImportError:  # Allows pure helpers to be imported outside iTerm2.
     iterm2 = None  # type: ignore[assignment]
 
 from .config import DEFAULT_CONTEXT_LINES, MAX_CONTEXT_LINES, MIN_CONTEXT_LINES
+from .safety import REDACTION_STATUS_TEXT, redacted_terminal_context
 
 logger = logging.getLogger(__name__)
 
@@ -192,16 +193,18 @@ async def _get_variable(session: iterm2.Session, name: str) -> Optional[str]:
 
 def build_user_message(ctx: dict) -> str:
     """Format the context dict into a human-readable prompt for the LLM."""
+    sent_ctx = redacted_terminal_context(ctx)
     lines = [
-        f"Command: {ctx['command'] or '(unknown)'}",
-        f"Exit code: {ctx['exit_code']}",
-        f"Working directory: {ctx['cwd'] or '(unknown)'}",
-        f"Shell: {ctx['shell'] or '(unknown)'}",
-        f"OS: {ctx['os_name']} {ctx['os_version']}",
+        f"Command: {sent_ctx.get('command') or '(unknown)'}",
+        f"Exit code: {sent_ctx.get('exit_code')}",
+        f"Working directory: {sent_ctx.get('cwd') or '(unknown)'}",
+        f"Shell: {sent_ctx.get('shell') or '(unknown)'}",
+        f"OS: {sent_ctx.get('os_name')} {sent_ctx.get('os_version')}",
+        f"{REDACTION_STATUS_TEXT}: command/output secrets are replaced with [REDACTED].",
         "",
         "Terminal output (last lines before command exited):",
         "---",
-        ctx["terminal_output"] or "(no output captured)",
+        sent_ctx.get("terminal_output") or "(no output captured)",
         "---",
         "",
         "Analyze the error above and return your Markdown response.",
@@ -211,8 +214,9 @@ def build_user_message(ctx: dict) -> str:
 
 def build_manual_system_prompt(ctx: dict) -> str:
     """Build the system message for a user-authored terminal question."""
-    terminal_output = ctx.get("terminal_output") or ""
-    terminal_line_count = ctx.get("terminal_output_line_count")
+    sent_ctx = redacted_terminal_context(ctx)
+    terminal_output = sent_ctx.get("terminal_output") or ""
+    terminal_line_count = sent_ctx.get("terminal_output_line_count")
     if not isinstance(terminal_line_count, int):
         terminal_line_count = _count_lines(terminal_output)
     line_label = "line" if terminal_line_count == 1 else "lines"
@@ -223,9 +227,10 @@ def build_manual_system_prompt(ctx: dict) -> str:
         "Use the terminal session context below as system context for this request.",
         "The command-line code/output is the recent terminal content captured from the current session.",
         "",
-        f"Working directory: {ctx.get('cwd') or '(unknown)'}",
-        f"Shell: {ctx.get('shell') or '(unknown)'}",
-        f"OS: {ctx.get('os_name') or '(unknown)'} {ctx.get('os_version') or ''}".rstrip(),
+        f"Working directory: {sent_ctx.get('cwd') or '(unknown)'}",
+        f"Shell: {sent_ctx.get('shell') or '(unknown)'}",
+        f"OS: {sent_ctx.get('os_name') or '(unknown)'} {sent_ctx.get('os_version') or ''}".rstrip(),
+        f"{REDACTION_STATUS_TEXT}: terminal command/output secrets are replaced with [REDACTED].",
         "",
         (
             "Current iTerm2 session command-line code/output "
